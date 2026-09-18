@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.wav
+*.pt
+probe/
+probe2/
+out/
