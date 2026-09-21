@@ -58,7 +58,7 @@ def encode(pk, text, voice):
 
 def predict(tm, seq, sp):
     """Предсказанные длительности (кадры на символ) и нормированный pitch."""
-    mask = torch.zeros(1, seq.shape[1], dtype=torch.bool)
+    mask = torch.zeros(1, seq.shape[1], dtype=torch.bool, device=seq.device)
     ld = tm.dur_predictor(seq, sp, mask, 1.0, None)
     dur = torch.round(torch.clamp(torch.exp(ld) - 1, min=0))
     pitch = tm.pitch_predictor(seq, sp, mask, None, None)
