@@ -63,6 +63,16 @@ def split_text(t, limit=300):
     return out or [t.strip()]
 
 
+def utf8_or_cp1251(raw):
+    """curl из Windows шлёт текст в кодировке консоли: «Который час» уезжает
+    как cp1251 (%CA%EE%F2…), и Silero на таком мусоре бросает голый ValueError.
+    Пробуем UTF-8, а если байты в него не складываются — cp1251."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1251", "replace")
+
+
 def wav_bytes(x, sr):
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
@@ -216,6 +226,10 @@ class Handler(BaseHTTPRequestHandler):
     def _say(self, text, q):
         if not text.strip():
             return self._json({"error": "пустой текст"}, 400)
+        if not re.search(r"[а-яёА-ЯЁ]", text):
+            return self._json({"error": "в тексте нет русских букв — похоже на "
+                                        "битую кодировку; шлите UTF-8",
+                               "получено": text[:80]}, 400)
         try:
             r = self.eng.say(text,
                              speaker=(q.get("speaker") or [None])[0],
@@ -223,6 +237,9 @@ class Handler(BaseHTTPRequestHandler):
                              numbers=(q.get("numbers", ["1"])[0] != "0"),
                              sr=int((q.get("sr") or [self.eng.a.sr])[0]))
         except Exception as exc:                       # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            print(f"упал запрос {self.path!r} от {self.client_address[0]}", flush=True)
             return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
         if (q.get("format") or ["wav"])[0] == "json":
             return self._json({k: v for k, v in r.items() if k != "pcm"})
@@ -238,9 +255,17 @@ class Handler(BaseHTTPRequestHandler):
         print(f"http {r['sec']:.2f} с речи за {r['synth_sec']:.2f} с"
               + (f", ВНЕ АЛФАВИТА {r['lost']}" if r["lost"] else ""), flush=True)
 
+    def _query(self, raw):
+        """разбор с терпимостью к cp1251: http.server отдаёт строку запроса
+        как latin-1, поэтому возвращаем байты и декодируем сами"""
+        out = {}
+        for k, v in parse_qs(raw, encoding="latin-1").items():
+            out[k] = [utf8_or_cp1251(s.encode("latin-1", "replace")) for s in v]
+        return out
+
     def do_GET(self):
         u = urlparse(self.path)
-        q = parse_qs(u.query)
+        q = self._query(u.query)
         if u.path == "/health":
             s = dict(self.eng.stat)
             s["uptime_sec"] = round(time.time() - s.pop("started"), 1)
@@ -260,8 +285,8 @@ class Handler(BaseHTTPRequestHandler):
         if u.path != "/say":
             return self._json({"error": "нет такого пути"}, 404)
         n = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(n).decode("utf-8", "replace")
-        q = parse_qs(urlparse(self.path).query)
+        body = utf8_or_cp1251(self.rfile.read(n))
+        q = self._query(u.query)
         if body.lstrip().startswith("{"):
             try:
                 d = json.loads(body)

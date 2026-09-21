@@ -34,7 +34,8 @@ def main():
     ap.add_argument("--model", default="/w/train/model_stage2.pt")
     ap.add_argument("--out", default="/w/train/model_voice.pt")
     ap.add_argument("--pitch-gain", type=float, default=1.5)
-    ap.add_argument("--dur-gain", type=float, default=1.08)
+    ap.add_argument("--dur-gain", type=float, default=1.0,
+                    help="темп: 1.0 выбран на слух, 1.08 был первой пробой")
     ap.add_argument("--row", type=int, default=4)
     ap.add_argument("--probe", type=int, default=20, help="фраз для подбора сдвига dur")
     a = ap.parse_args()
