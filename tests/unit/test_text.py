@@ -119,6 +119,13 @@ def test_accentor_picks_an_engine_by_name():
     assert Stress.__call__ is not Accent.__call__
 
 
+def test_post_accent_converts_the_em_dash():
+    # «—» не входит в алфавит Silero: без замены оно выпадает вместе с паузой
+    out = post_accent("ни одного события — и при этом жалко")
+    assert "—" not in out and "события – и" in out
+    assert outside(out, ALPHABET) == []
+
+
 def test_post_accent_glues_punctuation_to_the_word():
     # silero-stress отбивает знак пробелом, а в корпусе шага 1 такого нет
     assert post_accent("харб+ина .") == "харб+ина."
