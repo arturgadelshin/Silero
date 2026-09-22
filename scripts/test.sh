@@ -13,7 +13,12 @@ ssh "$HOST" "docker image inspect silero_test >/dev/null 2>&1 \
   || docker build -t silero_test -f ~/$DST/docker/Dockerfile.test ~/$DST/docker"
 # PYTHONDONTWRITEBYTECODE и no:cacheprovider обязательны: контейнер работает от
 # root и иначе насорит __pycache__ в примонтированный код, а deploy потом не
-# сможет их удалить
+# сможет их удалить.
+#
+# Вывод собирается в файл на сервере и печатается отдельной командой: если
+# отдавать его из docker run прямо в ssh, последняя строка — та самая сводка
+# «N passed» — по дороге теряется. Код возврата pytest сохраняем.
 ssh "$HOST" "docker run --rm --network host -e PYTHONDONTWRITEBYTECODE=1 \
   -v ~/$DST:/app -v ~/$DATA:/w -v ~/$DATA/hub:/root/.cache/torch/hub -w /app \
-  silero_test python -m pytest -p no:cacheprovider ${*:--m 'not slow'}"
+  silero_test python -m pytest -p no:cacheprovider ${*:--m 'not slow'} \
+    >/tmp/silero_pytest.log 2>&1; rc=\$?; cat /tmp/silero_pytest.log; exit \$rc"
