@@ -1,0 +1,25 @@
+# TTS своим голосом. Код монтируется, а не запекается в образ: правка файла и
+# перезапуск контейнера — весь цикл. Данные (веса, кэш hub, модели RUAccent)
+# лежат отдельно в /w, их переносить незачем.
+#
+#   cd ~/linkplay/silero/service && docker compose up -d
+#
+# network_mode: host обязателен — gigaam слушает 127.0.0.1:10407, а порты
+# 10500 (HTTP) и 10501 (wyoming) слушаем мы.
+services:
+  tts:
+    image: silero_ru
+    container_name: silero_tts
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /app
+    command: python -m service.tts
+    environment:
+      # контейнер работает от root: без этого он сорит __pycache__ в /app,
+      # и deploy потом не может их удалить
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ${SILERO_CODE:-${HOME}/linkplay/silero}:/app
+      - ${SILERO_DATA_DIR:-${HOME}/linkplay/tmp/silero}:/w
+      - ${SILERO_DATA_DIR:-${HOME}/linkplay/tmp/silero}/hub:/root/.cache/torch/hub
+      - ${SILERO_DATA_DIR:-${HOME}/linkplay/tmp/silero}/ruaccent:/ruaccent

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tts_service.py — всегда прогретый TTS своим голосом: HTTP и wyoming.
+"""tts.py — всегда прогретый TTS своим голосом: HTTP и wyoming.
 
 Всё дорогое делается один раз на старте: модель (2 с), RUAccent (25 с) и
 прогрев jit (первые два синтеза идут по секунде, третий уже 24 мс). Дальше на
@@ -19,19 +19,17 @@
 
   docker run -d --restart unless-stopped --name silero_tts --network host \
     -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero/ruaccent:/ruaccent -v ~/linkplay/tmp/silero:/w \
-    silero_ru python /w/tts_service.py
+    -v ~/linkplay/tmp/silero/ruaccent:/ruaccent \
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app \
+    silero_ru python -m service.tts
 """
 import argparse
-import io
 import json
 import os
 import re
 import socketserver
-import sys
 import threading
 import time
-import wave
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -39,61 +37,17 @@ from urllib.parse import urlparse, parse_qs
 import numpy as np
 import torch
 
+from voice.audio import pcm_bytes, resample, wav_from_pcm
+from voice.model import SR, encode, load, load_state, predict, synth
+from voice.paths import data
+from voice.text import Accent, outside, prepare, split_text, utf8_or_cp1251
+
 VERSION = "1.0"
-SPLIT = re.compile(r"(?<=[.!?…])\s+")
-
-
-def split_text(t, limit=300):
-    """длинный текст — по предложениям: первый кусок звучит, пока считается второй"""
-    out = []
-    for chunk in (s.strip() for s in t.replace("\n", " ").split("|") if s.strip()):
-        for s in SPLIT.split(chunk):
-            s = s.strip()
-            if not s:
-                continue
-            while len(s) > limit:                      # очень длинное — режем по запятой
-                cut = s.rfind(",", 0, limit)
-                cut = cut + 1 if cut > limit // 3 else limit
-                out.append(s[:cut].strip())
-                s = s[cut:].strip()
-            if out and len(out[-1]) < 40:              # короткий огрызок — к предыдущему
-                out[-1] = (out[-1] + " " + s).strip()
-            else:
-                out.append(s)
-    return out or [t.strip()]
-
-
-def utf8_or_cp1251(raw):
-    """curl из Windows шлёт текст в кодировке консоли: «Который час» уезжает
-    как cp1251 (%CA%EE%F2…), и Silero на таком мусоре бросает голый ValueError.
-    Пробуем UTF-8, а если байты в него не складываются — cp1251."""
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return raw.decode("cp1251", "replace")
-
-
-def wav_bytes(x, sr):
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(sr)
-        w.writeframes(pcm_bytes(x))
-    return buf.getvalue()
-
-
-def pcm_bytes(x):
-    return (np.clip(x, -1.0, 1.0) * 32767).astype("<i2").tobytes()
 
 
 class Engine:
     def __init__(self, a):
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from silero_probe2 import load, encode, predict, synth, SR
-        from train_voice import load_state
         self.SR = SR
-        self._encode, self._predict, self._synth = encode, predict, synth
         t0 = time.time()
         _, self.pk, self.tm = load()
         torch.set_grad_enabled(False)
@@ -105,20 +59,8 @@ class Engine:
         t_acc = 0.0
         if not a.no_accent:
             t0 = time.time()
-            from prep_text import pre_ruaccent, post_ruaccent, patch_token_type_ids
-            from say import fix_known
-            from ruaccent import RUAccent
-            self._pre, self._post, self._fix = pre_ruaccent, post_ruaccent, fix_known
-            self.acc = RUAccent()
-            try:
-                self.acc.load(omograph_model_size=a.accent_model, use_dictionary=True,
-                              workdir=a.ruaccent_dir)
-            except TypeError:
-                self.acc.load(omograph_model_size=a.accent_model, use_dictionary=True)
-            patch_token_type_ids(self.acc.accent_model.session)
+            self.acc = Accent(a.accent_model, a.ruaccent_dir)
             t_acc = time.time() - t0
-        from rutext import expand
-        self._expand = expand
 
         self.a = a
         self.sem = threading.Semaphore(a.workers)
@@ -147,22 +89,17 @@ class Engine:
 
     # ---------------------------------------------------------------- текст
     def mark(self, s, accent=True, numbers=True):
-        if numbers:
-            s = self._expand(s)
-        if accent and self.acc is not None:
-            s = self._fix(self._post(self.acc.process_all(self._pre(s))))
-        lost = {c for c in s.lower().replace("+", "")
-                if c not in self.alphabet and c != " "}
-        return s, sorted(lost)
+        s = prepare(s, self.acc if accent else None, numbers)
+        return s, outside(s, self.alphabet)
 
     # ---------------------------------------------------------------- звук
     def _one(self, text, speaker):
         # режим grad в torch потоко-локальный, а запросы приходят в новых
         # потоках: без no_grad здесь тензоры требуют градиент и numpy() падает
         with torch.no_grad():
-            seq, sp = self._encode(self.pk, text, speaker)
-            mask, dur, pitch = self._predict(self.tm, seq, sp)
-            _, wav = self._synth(self.tm, seq, sp, mask, dur, pitch)
+            seq, sp = encode(self.pk, text, speaker)
+            mask, dur, pitch = predict(self.tm, seq, sp)
+            _, wav = synth(self.tm, seq, sp, mask, dur, pitch)
             return wav.numpy()
 
     def say(self, text, speaker=None, accent=True, numbers=True, sr=None, gap=0.25):
@@ -189,9 +126,7 @@ class Engine:
             parts.append(w)
         x = np.concatenate(parts)
         if sr != self.SR:
-            import torchaudio
-            with torch.no_grad():
-                x = torchaudio.functional.resample(torch.from_numpy(x), self.SR, sr).numpy()
+            x = resample(x, self.SR, sr)
         res = {"pcm": pcm_bytes(x), "sr": sr, "sec": len(x) / sr,
                "text": " ".join(marks), "lost": sorted(set(lost)),
                "synth_sec": time.time() - t0}
@@ -243,8 +178,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
         if (q.get("format") or ["wav"])[0] == "json":
             return self._json({k: v for k, v in r.items() if k != "pcm"})
-        b = wav_bytes(np.frombuffer(r["pcm"], dtype="<i2").astype(np.float32) / 32768,
-                      r["sr"])
+        b = wav_from_pcm(r["pcm"], r["sr"])
         self.send_response(200)
         self.send_header("Content-Type", "audio/wav")
         self.send_header("Content-Length", str(len(b)))
@@ -373,7 +307,7 @@ class TCP(socketserver.ThreadingTCPServer):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="/w/train/model_voice.pt")
+    ap.add_argument("--model", default=data("train/model_voice.pt"))
     ap.add_argument("--speaker", default="xenia", help="строка обученного голоса")
     ap.add_argument("--row", type=int, default=4)
     ap.add_argument("--sr", type=int, default=48000, help="частота ответа HTTP")

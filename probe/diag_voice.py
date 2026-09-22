@@ -13,37 +13,36 @@
 с целью, а также F0 звука рядом с эталоном F5.
 
   docker run --rm -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero:/w silero_ru \
-    python /w/diag_voice.py --model /w/train/model_stage2.pt --out /w/diag2
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app silero_ru \
+    python -m probe.diag_voice --model /w/train/model_stage2.pt --out /w/diag2
 """
 import argparse
 import os
-import sys
 
 import numpy as np
 import torch
 
+from voice.audio import write16
+from voice.model import SR, encode, load, load_state, predict, synth
+from voice.paths import data
+from voice.targets import load_stats, load_targets
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="/w/train/voice_stage1.pt",
+    ap.add_argument("--model", default=data("train/voice_stage1.pt"),
                     help="файл голоса [2,128] или целая модель ступени 2+")
-    ap.add_argument("--out", default="/w/diag")
-    ap.add_argument("--targets", default="/w/targets")
-    ap.add_argument("--f5", default="/w/f5")
+    ap.add_argument("--out", default=data("diag"))
+    ap.add_argument("--targets", default=data("targets"))
+    ap.add_argument("--f5", default=data("f5"))
     ap.add_argument("--row", type=int, default=4)
     ap.add_argument("--n", type=int, default=4)
     a = ap.parse_args()
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import librosa
-    from silero_probe2 import load, encode, predict, synth, write16, SR
-    from train_voice import load_state, load_targets
-
     _, pk, tm = load()
     torch.set_grad_enabled(False)
-    st = torch.load(os.path.join(a.targets, "stats.pt"))
-    mu, sd, B = st["f0_mean"], st["f0_std"], st["mask_band"]
+    mu, sd, B = load_stats(a.targets)
     tm = load_state(tm, a.model, a.row, "cpu")
     os.makedirs(a.out, exist_ok=True)
     val = load_targets(a.targets, "val")[:a.n]

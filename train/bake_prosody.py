@@ -18,21 +18,25 @@
 медленнее. Они и так изменены ступенью 2.
 
   docker run --rm -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero:/w silero_ru python /w/bake_prosody.py \
-    --model /w/train/model_stage2.pt --out /w/train/model_voice.pt
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app silero_ru \
+    python -m train.bake_prosody --model /w/train/model_stage2.pt \
+    --out /w/train/model_voice.pt
 """
 import argparse
 import math
 import os
-import sys
 
 import torch
+
+from voice.model import encode, load, load_state, predict
+from voice.paths import data
+from voice.phrases import phrases
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="/w/train/model_stage2.pt")
-    ap.add_argument("--out", default="/w/train/model_voice.pt")
+    ap.add_argument("--model", default=data("train/model_stage2.pt"))
+    ap.add_argument("--out", default=data("train/model_voice.pt"))
     ap.add_argument("--pitch-gain", type=float, default=1.5)
     ap.add_argument("--dur-gain", type=float, default=1.0,
                     help="темп: 1.0 выбран на слух, 1.08 был первой пробой")
@@ -40,15 +44,10 @@ def main():
     ap.add_argument("--probe", type=int, default=20, help="фраз для подбора сдвига dur")
     a = ap.parse_args()
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from silero_probe2 import load, encode, predict
-    from train_voice import load_state
-
     _, pk, tm = load()
     torch.set_grad_enabled(False)
     tm = load_state(tm, a.model, a.row, "cpu")
 
-    from silero_probe2 import phrases
     probe = [encode(pk, t, "xenia") for t in phrases(a.probe)]
     base = [predict(tm, s, v) for s, v in probe]
     d0 = sum(float(x[1].sum()) for x in base)

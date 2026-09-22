@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""silero_probe.py — вскрытие Silero TTS v5_5_ru: что внутри и учится ли (SILERO.md).
+"""probe1.py — вскрытие Silero TTS v5_5_ru: что внутри и учится ли (SILERO.md).
 
 Только чтение: модель грузится из torch hub cache, ничего не сохраняется.
 Запуск (сервер, CPU, чтобы не мешать обучению на GPU):
   docker run --rm -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero:/w kws_tts python /w/silero_probe.py --out /w/probe
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app \
+    silero_ru python -m probe.probe1 --out /w/probe
 (кэш hub — копия из kws_lab: docker cp kws_lab:/root/.cache/torch/hub ~/linkplay/tmp/silero/)
 
 Печатает: говорящих и их id, алфавит, мел/STFT-параметры, дерево подмодулей
@@ -16,20 +17,13 @@
 import argparse
 import os
 import time
-import wave
 
 import numpy as np
 import torch
 
-HUB = "snakers4/silero-models"
-
-
-def write16(path, x, sr):
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(np.clip(np.round(x * 32767.0), -32768, 32767).astype("<i2").tobytes())
+from voice.audio import write16
+from voice.model import HUB
+from voice.paths import data
 
 
 def nparams(m):

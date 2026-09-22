@@ -16,40 +16,40 @@
 ли вообще дообучать предсказатель.
 
   docker run --rm --network host -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero:/w silero_ru \
-    python /w/prosody_try.py --model /w/train/model_stage2.pt --out /w/prosody
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app silero_ru \
+    python -m probe.prosody_try --model /w/train/model_stage2.pt --out /w/prosody
 """
 import argparse
 import os
-import sys
 
 import numpy as np
 import torch
 
+from voice.asr import transcribe_pcm
+from voice.audio import write16
+from voice.model import SR, encode, load, load_state, predict, synth
+from voice.paths import data
+from voice.targets import load_stats, load_targets
+from voice.text import cer
+
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="/w/train/model_stage2.pt")
-    ap.add_argument("--out", default="/w/prosody")
-    ap.add_argument("--targets", default="/w/targets")
-    ap.add_argument("--f5", default="/w/f5")
+    ap.add_argument("--model", default=data("train/model_stage2.pt"))
+    ap.add_argument("--out", default=data("prosody"))
+    ap.add_argument("--targets", default=data("targets"))
+    ap.add_argument("--f5", default=data("f5"))
     ap.add_argument("--row", type=int, default=4)
     ap.add_argument("--n", type=int, default=4)
     ap.add_argument("--asr-host", default="127.0.0.1")
     ap.add_argument("--asr-port", type=int, default=10407)
     a = ap.parse_args()
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import librosa
     import torchaudio
-    from asr_scan import transcribe_pcm
-    from silero_probe2 import load, encode, predict, synth, write16, cer, SR
-    from train_voice import load_state, load_targets
-
     _, pk, tm = load()
     torch.set_grad_enabled(False)
-    st = torch.load(os.path.join(a.targets, "stats.pt"))
-    mu, sd = st["f0_mean"], st["f0_std"]
+    mu, sd, _ = load_stats(a.targets)
     tm = load_state(tm, a.model, a.row, "cpu")
     os.makedirs(a.out, exist_ok=True)
     val = load_targets(a.targets, "val")[:a.n]

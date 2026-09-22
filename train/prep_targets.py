@@ -19,20 +19,22 @@ stats.pt как mask_band. Верх при обучении остаётся о�
 
 Запуск (сервер, CPU, части параллельно):
   docker run --rm -e SILERO_THREADS=6 -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero:/w silero_ru python /w/prep_targets.py --part 0/6
-  затем один раз: python /w/prep_targets.py --stats
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app \
+    silero_ru python -m train.prep_targets --part 0/6
+  затем один раз: python -m train.prep_targets --stats
 """
 import argparse
 import json
 import os
-import sys
 import warnings
 
 import numpy as np
 import torch
 
-SR = 48000
-HOP = 600
+from voice.audio import dtw_durs, f0_track, feats, symbol_f0
+from voice.model import HOP, SR, encode, load, predict, synth
+from voice.paths import data
+
 N_FFT = 2400
 MELS = 192
 CENTER = 300                      # смещение центра кадра, сэмплы
@@ -63,8 +65,8 @@ def fix_durs(d, T):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--f5", default="/w/f5")
-    ap.add_argument("--out", default="/w/targets")
+    ap.add_argument("--f5", default=data("f5"))
+    ap.add_argument("--out", default=data("targets"))
     ap.add_argument("--voice", default="eugene", help="стоковый голос-опора для DTW")
     ap.add_argument("--part", default="0/1")
     ap.add_argument("--limit", type=int, default=0)
@@ -74,7 +76,6 @@ def main():
     a = ap.parse_args()
 
     warnings.filterwarnings("ignore")
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     os.makedirs(a.out, exist_ok=True)
 
     if a.stats:
@@ -82,7 +83,6 @@ def main():
 
     import soundfile as sf
     import torchaudio
-    from silero_probe2 import load, encode, predict, synth, feats, dtw_durs, f0_track, symbol_f0
 
     _, pk, tm = load()
     torch.set_grad_enabled(False)

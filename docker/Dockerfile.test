@@ -1,0 +1,4 @@
+# silero_test: silero_ru + pytest. В боевой образ pytest не кладём — он нужен
+# только для tests/, а сервис и обучение должны ехать без лишнего.
+FROM silero_ru
+RUN pip install --no-cache-dir pytest

@@ -16,8 +16,8 @@
 
 Запуск (сервер, CPU):
   docker run --rm -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero/ruaccent:/ruaccent -v ~/linkplay/tmp/silero:/w \
-    silero_ru python /w/prep_text.py
+    -v ~/linkplay/tmp/silero/ruaccent:/ruaccent -v ~/linkplay/silero:/app \
+    -v ~/linkplay/tmp/silero:/w -w /app silero_ru python -m train.prep_text
 
 Выход ({out}):
   texts.tsv      i, split(train/val), sec_est, текст для F5/Silero
@@ -30,13 +30,11 @@ import os
 import random
 import re
 
-VOWELS = "аеёиоуыэюя"
+from voice.paths import data
+from voice.text import Accent, stress_map, syllables
+
 # темп RUSLAN по оценке — слогов в секунду; уточняется по F5 на шаге 3
 SYL_PER_SEC = 4.5
-
-
-def syllables(t):
-    return sum(1 for ch in t.lower() if ch in VOWELS)
 
 
 def read_tsv(path):
@@ -44,61 +42,10 @@ def read_tsv(path):
         return [line.rstrip("\n").split("\t") for line in f if line.strip()]
 
 
-def patch_token_type_ids(sess):
-    """RUAccent 1.5.8.3: модель ударений незнакомых слов (nn_accent) требует
-    вход token_type_ids, а CharTokenizer при transformers из kws_tts его не
-    отдаёт — ValueError на первом же слове не из словаря. Подставляем нули,
-    как BERT делает по умолчанию для одного сегмента."""
-    import numpy as np
-    need = {i.name for i in sess.get_inputs()}
-    if "token_type_ids" not in need:
-        return
-    run = sess.run
-
-    def run_fixed(out, feed, *args, **kw):
-        if "token_type_ids" not in feed:
-            feed = dict(feed, token_type_ids=np.zeros_like(feed["input_ids"]))
-        return run(out, feed, *args, **kw)
-    sess.run = run_fixed
-
-
-def pre_ruaccent(t):
-    """RUAccent 1.5.8.3 молча выкидывает «…», «–», «—» и неразрывный дефис U+2011
-    («по‑английски» -> «поанглийски»), а «...», « - », «-», «:», «;» сохраняет.
-    Кавычки и скобки Silero всё равно выкинет — меняем их на пробел, иначе
-    «(нет)» после RUAccent прилипает к соседнему слову."""
-    t = t.replace("́", "").replace("’", "")   # редкое авторское ударение, апостроф
-    t = t.replace("‑", "-").replace("‐", "-")
-    t = t.replace("…", "...")
-    t = re.sub(r"\s*[–—]\s*", " - ", t)
-    t = re.sub(r"[«»„“”\"()\[\]]", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def post_ruaccent(t):
-    """обратно к символам Silero: «...» -> «…», отдельно стоящий « - » -> « – »"""
-    t = re.sub(r"\.\.\.+", "…", t)
-    t = re.sub(r"(^|\s)-(\s|$)", r"\1–\2", t)
-    # реплика диалога «–Недавно…» без пробела: дефис в начале слова — всегда тире
-    t = re.sub(r"(^|\s)-(?=\S)", r"\1– ", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def stress_map(t):
-    """слово без «+» -> индекс ударной гласной (по счёту гласных), только слова с «+»"""
-    out = {}
-    for w in re.findall(r"[а-яё+\-]+", t.lower()):
-        if "+" not in w:
-            continue
-        pre = w.split("+")[0]
-        out[w.replace("+", "").replace("ё", "е")] = sum(ch in VOWELS for ch in pre)
-    return out
-
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", default="/w/ruslan")
-    ap.add_argument("--out", default="/w/ruslan")
+    ap.add_argument("--src", default=data("ruslan"))
+    ap.add_argument("--out", default=data("ruslan"))
     ap.add_argument("--ruaccent-dir", default="/ruaccent")
     ap.add_argument("--model", default="turbo3.1")
     ap.add_argument("--hours", type=float, default=2.0, help="сколько часов речи отобрать")
@@ -110,7 +57,6 @@ def main():
     a = ap.parse_args()
 
     import torch
-    from ruaccent import RUAccent
 
     torch.set_num_threads(int(os.environ.get("SILERO_THREADS", "4")))
     model, _ = torch.hub.load("snakers4/silero-models", "silero_tts",
@@ -119,12 +65,7 @@ def main():
     symbols = pk.symbols
     alphabet = set(symbols[3:])
 
-    acc = RUAccent()
-    try:
-        acc.load(omograph_model_size=a.model, use_dictionary=True, workdir=a.ruaccent_dir)
-    except TypeError:
-        acc.load(omograph_model_size=a.model, use_dictionary=True)
-    patch_token_type_ids(acc.accent_model.session)
+    acc = Accent(a.model, a.ruaccent_dir)
 
     rows = read_tsv(os.path.join(a.src, "ruslan.tsv"))
     if a.limit:
@@ -150,7 +91,7 @@ def main():
         if not (a.min_sec <= sec <= a.max_sec):
             drop["длина"] += 1
             continue
-        t1 = post_ruaccent(acc.process_all(pre_ruaccent(text)))
+        t1 = acc(text)
         t2 = pk.accentor(t1, put_stress=True, put_stress_homo=True, put_yo=True,
                          put_yo_homo=True, stress_single_vowel=True)
         # F5 читает ровно то, что Silero превратит в токены: всё, что Silero

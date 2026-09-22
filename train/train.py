@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""train_voice.py — шаг 6: обучить Silero v5_5_ru своему голосу на целях шага 5.
+"""train.py — шаг 6: обучить Silero v5_5_ru своему голосу на целях шага 5.
 
 Учительский путь FastPitch: в декодер подаются ИСТИННЫЕ длительности и pitch из
 `targets/`, поэтому мел сравнивается кадр в кадр. Предсказатели длительности и
@@ -23,32 +23,26 @@ MSE по `ln(1+dur)` и MSE по нормированному pitch. Всё, к�
 Запуск (GPU; занимает один из трёх слотов RTX 3070):
   docker run --rm --gpus all -e SILERO_THREADS=4 \
     -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero:/w silero_ru python /w/train_voice.py --stage 1
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app \
+    silero_ru python -m train.train --stage 1
   проверка после обучения (нужен gigaam, поэтому --network host):
-  ... silero_ru python /w/train_voice.py --check /w/train/voice_stage1.pt
+  ... silero_ru python -m train.train --check /w/train/voice_stage1.pt
 """
 import argparse
 import json
 import os
 import random
-import sys
 import time
 
 import numpy as np
 import torch
 
-SR = 48000
-EMB = 128                      # размер строки голоса в tacotron; dur/pitch по 64
-
-
-def load_targets(d, split=None):
-    files = sorted(f for f in os.listdir(d) if f.endswith(".pt") and f != "stats.pt")
-    out = []
-    for f in files:
-        r = torch.load(os.path.join(d, f), map_location="cpu")
-        if split is None or r["split"] == split:
-            out.append(r)
-    return out
+from voice.asr import transcribe_pcm
+from voice.audio import write16
+from voice.model import EMB, SR, encode, load, load_state, predict, synth, voice_tensor
+from voice.paths import data
+from voice.targets import load_stats, load_targets
+from voice.text import cer
 
 
 def batches(items, size, shuffle, rng=None):
@@ -127,38 +121,11 @@ def trainable(tm, stage, row, train_pred=True):
     return [P[k] for k in rows], [P[k] for k in extra], rows, extra
 
 
-def voice_tensor(tm, row):
-    """строки голоса в формате файла Silero: [2,128] = мел | dur+pitch"""
-    P = dict(tm.named_parameters())
-    mel = P["tacotron.speaker_embedding.weight"][row].detach().cpu()
-    dur = P["dur_predictor.dur_pred.speaker_embedding.weight"][row].detach().cpu()
-    pit = P["pitch_predictor.pitch_pred.speaker_embedding.weight"][row].detach().cpu()
-    return torch.stack([mel, torch.cat([dur, pit])])
-
-
-def set_voice(tm, row, v):
-    P = dict(tm.named_parameters())
-    with torch.no_grad():
-        P["tacotron.speaker_embedding.weight"][row] = v[0].to(P["tacotron.speaker_embedding.weight"])
-        P["dur_predictor.dur_pred.speaker_embedding.weight"][row] = v[1, :EMB // 2]
-        P["pitch_predictor.pitch_pred.speaker_embedding.weight"][row] = v[1, EMB // 2:]
-
-
-def load_state(tm, path, row, dev):
-    """файл голоса [2,128] кладём в строку; целую модель ступени 2 грузим как jit"""
-    try:
-        return torch.jit.load(path, map_location=dev)
-    except Exception:                                   # noqa: BLE001
-        v = torch.load(path, map_location=dev)
-        set_voice(tm, row, v if torch.is_tensor(v) else v["voice"])
-        return tm
-
-
-def evaluate(tm, data, a, band, mu, sd, dev):
+def evaluate(tm, items, a, band, mu, sd, dev):
     tot = np.zeros(3)
     n = 0
     with torch.no_grad():
-        for b in batches(data, a.batch, False):
+        for b in batches(items, a.batch, False):
             l = losses(tm, collate(b, a.row, mu, sd, dev), band)
             tot += np.array([float(x) for x in l]) * len(b)
             n += len(b)
@@ -167,8 +134,8 @@ def evaluate(tm, data, a, band, mu, sd, dev):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--targets", default="/w/targets")
-    ap.add_argument("--out", default="/w/train")
+    ap.add_argument("--targets", default=data("targets"))
+    ap.add_argument("--out", default=data("train"))
     ap.add_argument("--stage", type=int, default=1)
     ap.add_argument("--row", type=int, default=4, help="строка голоса (4 = место xenia)")
     ap.add_argument("--init-voice", default="eugene", help="с какого голоса начать (F0 ближе всех)")
@@ -191,13 +158,10 @@ def main():
     if not a.lr:
         a.lr = {1: 1e-2, 2: 1e-4}.get(a.stage, 5e-5)
 
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from silero_probe2 import load
     _, pk, tm = load()
     dev = a.device if torch.cuda.is_available() or a.device == "cpu" else "cpu"
     tm.to(dev)
-    st = torch.load(os.path.join(a.targets, "stats.pt"))
-    mu, sd, band = st["f0_mean"], st["f0_std"], st["mask_band"]
+    mu, sd, band = load_stats(a.targets)
     os.makedirs(a.out, exist_ok=True)
 
     if a.check:
@@ -285,8 +249,6 @@ def check(a, pk, tm, dev, mu, sd):
     """синтез отложенными фразами: CER gigaam, F0, длина; стоковые голоса целы"""
     import librosa
     import torchaudio
-    from asr_scan import transcribe_pcm
-    from silero_probe2 import write16, encode, predict, synth, cer
     tm = load_state(tm, a.check, a.row, dev)
     torch.set_grad_enabled(False)
     out = os.path.join(a.out, "check_" + os.path.splitext(os.path.basename(a.check))[0])

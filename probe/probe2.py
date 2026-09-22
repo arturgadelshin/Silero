@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""silero_probe2.py — вскрытие 2 Silero TTS v5_5_ru: закрыть оговорки SILERO.md.
+"""probe2.py — вскрытие 2 Silero TTS v5_5_ru: закрыть оговорки SILERO.md.
 
 Только чтение модели (стоковые веса не сохраняются; всё записанное — во --out).
 Запуск (сервер, CPU):
   docker run --rm -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero:/w kws_tts python /w/silero_probe2.py <cmd> --out /w/probe2
+    -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app \
+    silero_ru python -m probe.probe2 <cmd> --out /w/probe2
 
 Подкоманды:
   src    исходники из *.debug_pkl пакета + поиск параметров по строкам, режим train()
@@ -18,92 +19,17 @@ import collections
 import os
 import pickle
 import re
-import wave
 import zipfile
 
 import numpy as np
 import torch
 
-HUB = "snakers4/silero-models"
-PKG = "/root/.cache/torch/hub/snakers4_silero-models_master/src/silero/model/v5_5_ru.pt"
-SR = 48000
-HOP = 600
-VOICES = ["aidar", "baya", "kseniya", "eugene", "xenia"]
-
-
-def write16(path, x, sr=SR):
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(np.clip(np.round(np.asarray(x) * 32767.0), -32768, 32767)
-                       .astype("<i2").tobytes())
-
-
-def load():
-    torch.set_num_threads(int(os.environ.get("SILERO_THREADS", "8")))
-    model, _ = torch.hub.load(HUB, "silero_tts", language="ru", speaker="v5_5_ru")
-    pk = model.packages[0]
-    return model, pk, pk.models[0]
-
-
-def encode(pk, text, voice):
-    """Вход модели ровно как в apply_tts (ударения акцентора, sos/eos)."""
-    sp_ids, _ = pk.get_speakers(voice)
-    sentences, _, breaks, rates, pitches, sp = pk.prepare_tts_model_input(
-        text, ssml=False, speaker_ids=sp_ids, lang=None)
-    seq, symb_durs, durs_rate, pitch_coefs = pk.merge_batch_model(sentences, breaks, rates, pitches)
-    return seq, sp
-
-
-def predict(tm, seq, sp):
-    """Предсказанные длительности (кадры на символ) и нормированный pitch."""
-    mask = torch.zeros(1, seq.shape[1], dtype=torch.bool, device=seq.device)
-    ld = tm.dur_predictor(seq, sp, mask, 1.0, None)
-    dur = torch.round(torch.clamp(torch.exp(ld) - 1, min=0))
-    pitch = tm.pitch_predictor(seq, sp, mask, None, None)
-    # как в forward: на пунктуации pitch обнуляется
-    cum = torch.cumsum(torch.nn.functional.pad(dur[0], (1, 0)), 0)
-    for i, c in enumerate(seq[0].tolist()):
-        if c in tm.punkt_symbols:
-            pitch[0, 0, i] = 0.0
-    return mask, dur, pitch
-
-
-def synth(tm, seq, sp, mask, dur, pitch):
-    mel = tm.tacotron(seq, sp, mask, dur, pitch, None)
-    wav = tm.vocoder(mel, SR, 0.0, True)
-    return mel, wav.reshape(-1)
-
-
-def phrases(n):
-    """Фразы для замеров: ответы ассистента + разнообразные предложения."""
-    base = [
-        "Таймер на пять минут поставлен.", "Сейчас в Москве плюс двенадцать градусов.",
-        "Будильник сработает в семь тридцать утра.", "Включаю музыку в гостиной.",
-        "Громкость уменьшена до сорока процентов.", "Извините, я не расслышала вопрос.",
-        "Завтра ожидается дождь и сильный ветер.", "Напоминание удалено.",
-        "Хорошо, выключаю свет на кухне.", "До конца таймера осталась одна минута.",
-        "Съешь же ещё этих мягких французских булок да выпей чаю.",
-        "Широкая электрификация южных губерний даст мощный толчок подъёму сельского хозяйства.",
-        "В чащах юга жил бы цитрус? Да, но фальшивый экземпляр!",
-        "Эй, жлоб! Где туз? Прячь юных съёмщиц в шкаф.",
-        "Любя, съешь щипцы, вздохнёт мэр, кайф жгуч.",
-        "Флегматичная эта верблюдица жует у подъезда засыхающий горький шиповник.",
-        "Мы с тобой пойдём гулять, когда закончится дождь.",
-        "Почему небо голубое, а трава зелёная?",
-        "Позвони маме и скажи, что я задержусь на час.",
-        "Эта песня играла на прошлой неделе по радио.",
-    ]
-    rng = np.random.RandomState(7)
-    words = " ".join(base).lower().replace(".", "").replace(",", "").replace("!", "") \
-        .replace("?", "").split()
-    out = list(base)
-    while len(out) < n:
-        k = rng.randint(4, 12)
-        s = " ".join(rng.choice(words, k))
-        out.append(s[0].upper() + s[1:] + rng.choice([".", "?", "!", "."]))
-    return out[:n]
+from voice.asr import transcribe_pcm
+from voice.audio import dtw_durs, f0_track, feats, symbol_f0, write16
+from voice.model import HOP, PKG, SR, VOICES, encode, load, predict, synth
+from voice.paths import data
+from voice.phrases import phrases
+from voice.text import cer
 
 
 # ---------------------------------------------------------------- src
@@ -196,19 +122,6 @@ def cmd_src(a):
 
 
 # ---------------------------------------------------------------- mel
-def frames_mag(x, c, n_fft=2400, hop=HOP, power=1.0, T=None):
-    """|STFT| с окном Ханна: кадр t центрирован в t*hop + c (reflect-поля)."""
-    x = torch.as_tensor(x, dtype=torch.float32)
-    P = n_fft
-    xp = torch.nn.functional.pad(x[None, None], (P, P), mode="reflect")[0, 0]
-    T = T or len(x) // hop
-    starts = torch.arange(T) * hop + c + P - n_fft // 2
-    idx = starts[:, None] + torch.arange(n_fft)[None]
-    fr = xp[idx.clamp(0, len(xp) - 1)] * torch.hann_window(n_fft)
-    S = torch.fft.rfft(fr, dim=-1).abs().T          # [n_fft/2+1, T]
-    return S ** power
-
-
 def collect(n, voices=VOICES):
     """Пары (мел tacotron, звук вокодера) по n фразам на голос."""
     _, pk, tm = load()
@@ -303,32 +216,6 @@ def cmd_mel(a):
 
 
 # ---------------------------------------------------------------- pitch
-def f0_track(wav, T):
-    """F0 (Гц) по кадрам модели: 16 кГц, шаг 200 = 12.5 мс, центр кадра t*200+100.
-    NaN — глухо."""
-    import librosa
-    import torchaudio
-    x = torchaudio.functional.resample(torch.as_tensor(wav), SR, 16000).numpy()
-    x = np.pad(x, (0, 200 * T + 1024))
-    f0, vflag, _ = librosa.pyin(x[100:], fmin=60, fmax=500, sr=16000, frame_length=1024,
-                                hop_length=200, center=True)
-    f0 = f0[:T]
-    f0[~vflag[:T]] = np.nan
-    return f0
-
-
-def symbol_f0(f0, dur):
-    """Средний F0 по звонким кадрам каждого символа (NaN, если звонких нет)."""
-    cum = np.concatenate([[0], np.cumsum(dur)]).astype(int)
-    out = np.full(len(dur), np.nan)
-    for i in range(len(dur)):
-        seg = f0[cum[i]:cum[i + 1]]
-        seg = seg[~np.isnan(seg)]
-        if len(seg):
-            out[i] = seg.mean()
-    return out
-
-
 def cmd_pitch(a):
     import warnings
     warnings.filterwarnings("ignore")
@@ -387,34 +274,6 @@ def cmd_pitch(a):
 
 
 # ---------------------------------------------------------------- align
-def feats(wav, T):
-    """MFCC 1..20 из звука (16 кГц, шаг 12.5 мс, центр t*200+100), CMVN по фразе.
-    Считаются из ЗВУКА, а не из мела модели — как будет с настоящей записью."""
-    import librosa
-    import torchaudio
-    x = torchaudio.functional.resample(torch.as_tensor(wav), SR, 16000).numpy()
-    x = np.pad(x, (0, 200 * T + 1024))[100:]
-    m = librosa.feature.mfcc(y=x, sr=16000, n_mfcc=21, n_fft=1024, hop_length=200,
-                             n_mels=80, center=True)[1:, :T]
-    return (m - m.mean(1, keepdims=True)) / (m.std(1, keepdims=True) + 1e-5)
-
-
-def dtw_durs(ref_f, ref_dur, tgt_f):
-    """Длительности символов в цели: границы опорных символов через путь DTW."""
-    import librosa
-    _, wp = librosa.sequence.dtw(X=ref_f, Y=tgt_f, metric="euclidean")
-    wp = wp[::-1]
-    first = {}
-    for r, t in wp:
-        first.setdefault(int(r), int(t))
-    cum = np.concatenate([[0], np.cumsum(ref_dur)]).astype(int)
-    Tt = tgt_f.shape[1]
-    b = [first.get(min(c, ref_f.shape[1] - 1), Tt) if c < ref_f.shape[1] else Tt for c in cum]
-    b[0], b[-1] = 0, Tt
-    b = np.maximum.accumulate(np.array(b))
-    return np.diff(b)
-
-
 def cmd_align(a):
     import warnings
     warnings.filterwarnings("ignore")
@@ -454,29 +313,10 @@ def cmd_align(a):
 
 
 # ---------------------------------------------------------------- space
-def norm_text(s):
-    s = s.lower().replace("ё", "е").replace("+", "")
-    return re.sub(r"\s+", " ", re.sub(r"[^а-я ]", " ", s)).strip()
-
-
-def cer(ref, hyp):
-    r, h = norm_text(ref), norm_text(hyp)
-    prev = list(range(len(h) + 1))
-    for i in range(1, len(r) + 1):
-        cur = [i] + [0] * len(h)
-        for j in range(1, len(h) + 1):
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r[i - 1] != h[j - 1]))
-        prev = cur
-    return prev[-1] / max(1, len(r))
-
-
 def cmd_space(a):
-    import sys
     import warnings
     import torchaudio
     warnings.filterwarnings("ignore")
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from asr_scan import transcribe_pcm
     model, pk, tm = load()
     torch.set_grad_enabled(False)
     tabs = [tm.tacotron.speaker_embedding.weight,
@@ -570,10 +410,10 @@ def cmd_space(a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["src", "mel", "pitch", "align", "space"])
-    ap.add_argument("--out", default="/w/probe2")
+    ap.add_argument("--out", default=data("probe2"))
     ap.add_argument("--n", type=int, default=60, help="фраз на голос")
     ap.add_argument("--asr-host", default="127.0.0.1")
-    ap.add_argument("--asr-port", type=int, default=10407, help="wyoming gigaam (asr_scan.py)")
+    ap.add_argument("--asr-port", type=int, default=10407, help="wyoming gigaam (voice.asr)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     globals()["cmd_" + a.cmd](a)

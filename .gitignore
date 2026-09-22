@@ -1,8 +1,8 @@
 __pycache__/
 *.pyc
+.pytest_cache/
+# звук и веса живут на сервере в /w и релизом на GitHub, в git им не место
 *.wav
 *.pt
-probe/
-probe2/
 out/
 listen/

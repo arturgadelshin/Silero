@@ -21,77 +21,32 @@
 
 Запуск (сервер, GPU, gigaam на 127.0.0.1:10407 — нужен --network host):
   docker run --rm --gpus all --network host -e HF_HUB_OFFLINE=1 \
-    -v ~/linkplay/tmp/hf:/root/.cache/huggingface -v ~/linkplay/tmp/silero:/w \
-    silero_ru python /w/gen_f5.py --limit 50
+    -v ~/linkplay/tmp/hf:/root/.cache/huggingface -v ~/linkplay/silero:/app \
+    -v ~/linkplay/tmp/silero:/w -w /app silero_ru python -m train.gen_f5 --limit 50
 """
 import argparse
 import json
 import os
 import random
 import re
-import sys
 import time
 import wave
 
 import numpy as np
 
-VOWELS = set("аеёиоуыэюя")
-
-
-def syllables(text):
-    return max(1, sum(1 for ch in text.lower() if ch in VOWELS))
-
-
-def speech_span(x, sr, frame=0.02, rel_db=-40.0):
-    """границы речи по энергии: кадры не тише пика на rel_db; None — речи нет.
-    У F5 нет шума комнаты, поэтому порог по энергии здесь честный (у записи
-    с микрофона он принимал шорох мыши за речь — SILERO.md, шаг 2)."""
-    fl = max(1, int(frame * sr))
-    nf = len(x) // fl
-    if nf < 3:
-        return None
-    e = np.sqrt((x[:nf * fl].reshape(nf, fl) ** 2).mean(axis=1))
-    peak = float(e.max())
-    if peak < 1e-5:
-        return None
-    idx = np.nonzero(e >= peak * 10.0 ** (rel_db / 20.0))[0]
-    return int(idx[0] * fl), int(min(len(x), (idx[-1] + 1) * fl))
-
-
-def write16(path, x, sr):
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sr)
-        wf.writeframes(np.clip(np.round(x * 32767.0), -32768, 32767).astype("<i2").tobytes())
-
-
-def norm(t):
-    """для CER: без ударений, ё=е, только буквы"""
-    t = t.lower().replace("+", "").replace("ё", "е")
-    return re.sub(r"[^а-я]", "", t)
-
-
-def cer(ref, hyp):
-    r, h = norm(ref), norm(hyp)
-    if not r:
-        return 1.0
-    prev = list(range(len(h) + 1))
-    for i, rc in enumerate(r, 1):
-        cur = [i] + [0] * len(h)
-        for j, hc in enumerate(h, 1):
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (rc != hc))
-        prev = cur
-    return prev[-1] / len(r)
+from voice.asr import transcribe_pcm
+from voice.audio import speech_span, write16
+from voice.paths import data
+from voice.text import cer, syllables
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--texts", default="/w/ruslan/texts.tsv")
-    ap.add_argument("--ref", default="/w/ref/ref.wav")
-    ap.add_argument("--ref-text", default="/w/ref/ref_text.txt",
+    ap.add_argument("--texts", default=data("ruslan/texts.tsv"))
+    ap.add_argument("--ref", default=data("ref/ref.wav"))
+    ap.add_argument("--ref-text", default=data("ref/ref_text.txt"),
                     help="текст опоры в той же разметке, что и тексты (с «+»)")
-    ap.add_argument("--out", default="/w/f5")
+    ap.add_argument("--out", default=data("f5"))
     ap.add_argument("--limit", type=int, default=0, help="только первые N текстов (проба)")
     ap.add_argument("--part", default="0/1", help="i/n: каждый n-й текст, начиная с i")
     ap.add_argument("--tries", type=int, default=3)
@@ -115,14 +70,12 @@ def main():
     import torchaudio
     from huggingface_hub import hf_hub_download
     from f5_tts.api import F5TTS
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from asr_scan import transcribe_pcm
 
     ref_text = open(a.ref_text, encoding="utf-8").read().strip()
     ref_wav, ref_sr = sf.read(a.ref, dtype="float32")
     ref_dur = len(ref_wav) / ref_sr
     # темп опоры, с её паузами: секунд на слог
-    sec_per_syl = ref_dur / syllables(ref_text)
+    sec_per_syl = ref_dur / max(1, syllables(ref_text))
 
     rows = [ln.rstrip("\n").split("\t") for ln in open(a.texts, encoding="utf-8") if ln.strip()]
     if a.limit:
@@ -149,7 +102,7 @@ def main():
     sp, cers, t_gen, t_audio = [], [], 0.0, 0.0
     t_start = time.time()
     for n, (i, split, _sec, text) in enumerate(rows):
-        syl = syllables(text)
+        syl = max(1, syllables(text))
         # внутренние границы фраз: концевой знак не в счёт
         n_sent = len(re.findall(r"[.!?…]+\s", text))
         base = syl * sec_per_syl + n_sent * a.sent_pause
