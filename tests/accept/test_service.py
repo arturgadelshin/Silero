@@ -78,3 +78,11 @@ def test_wyoming_speaks_the_protocol(wyoming):
     s.close()
     assert hdr["type"] == "info"
     assert data["tts"][0]["voices"]
+
+
+def test_pause_query_overrides_the_cap(url):
+    # короткий хвост клеится к длинной фразе, и точка внутри неё должна
+    # укладываться в потолок: без потолка звука заметно больше
+    t = "Довольно длинное предложение про всё на свете, чтобы было что клеить. Ага."
+    n = [len(say(url, t, pause=p)[1]) for p in ("0", "0.5")]
+    assert n[0] > n[1]

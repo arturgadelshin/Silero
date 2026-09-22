@@ -60,3 +60,20 @@ def test_stock_voices_still_work(tts):
     except OSError:
         pytest.skip("gigaam не отвечает")
     assert c < 0.05
+
+
+def test_pause_cap_shortens_a_period_inside_a_phrase(tts):
+    from voice.model import HOP, SR, cap_pauses, encode, predict
+    pk, tm = tts
+    seq, sp = encode(pk, "Дов+ольно дл+инное предлож+ение про всё на св+ете. Аг+а.",
+                     "xenia")
+    _, dur, _ = predict(tm, seq, sp)
+    lim = 0.3           # после длинной фразы модель даёт точке 0.89 с
+    capped = cap_pauses(tm, seq, dur, lim)
+    punkt = [i for i, c in enumerate(seq[0].tolist()) if c in tm.punkt_symbols]
+    assert max(dur[..., i].item() for i in punkt) * HOP / SR > lim   # есть что резать
+    assert max(capped[..., i].item() for i in punkt) * HOP / SR <= lim
+    # буквы не трогаем, исходный тензор тоже
+    letters = [i for i in range(seq.shape[1]) if i not in punkt]
+    assert all(capped[..., i].item() == dur[..., i].item() for i in letters)
+    assert max(dur[..., i].item() for i in punkt) * HOP / SR > lim

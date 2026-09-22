@@ -84,6 +84,7 @@ def split_text(t, limit=300):
     """длинный текст — по предложениям: первый кусок звучит, пока считается второй"""
     out = []
     for chunk in (s.strip() for s in t.replace("\n", " ").split("|") if s.strip()):
+        start = len(out)                               # через «|» не клеим: это разрыв
         for s in SPLIT.split(chunk):
             s = s.strip()
             if not s:
@@ -97,7 +98,8 @@ def split_text(t, limit=300):
             # к соседу — и когда короток он сам («Ага.» в хвосте), и когда
             # короток предыдущий кусок. Склейка не должна перерасти limit,
             # иначе она сведёт на нет резку по запятой выше
-            if out and min(len(out[-1]), len(s)) < 40 and len(out[-1]) + len(s) < limit:
+            if len(out) > start and min(len(out[-1]), len(s)) < 40 \
+                    and len(out[-1]) + len(s) < limit:
                 out[-1] = (out[-1] + " " + s).strip()
             else:
                 out.append(s)

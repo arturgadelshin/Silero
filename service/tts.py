@@ -38,7 +38,8 @@ import numpy as np
 import torch
 
 from voice.audio import pcm_bytes, resample, wav_from_pcm
-from voice.model import SR, encode, load, load_state, predict, synth
+from voice.model import (SR, cap_pauses, encode, load, load_state, predict,
+                         synth)
 from voice.paths import data
 from voice.text import Accent, outside, prepare, split_text, utf8_or_cp1251
 
@@ -93,19 +94,22 @@ class Engine:
         return s, outside(s, self.alphabet)
 
     # ---------------------------------------------------------------- звук
-    def _one(self, text, speaker):
+    def _one(self, text, speaker, pause):
         # режим grad в torch потоко-локальный, а запросы приходят в новых
         # потоках: без no_grad здесь тензоры требуют градиент и numpy() падает
         with torch.no_grad():
             seq, sp = encode(self.pk, text, speaker)
             mask, dur, pitch = predict(self.tm, seq, sp)
+            dur = cap_pauses(self.tm, seq, dur, pause)
             _, wav = synth(self.tm, seq, sp, mask, dur, pitch)
             return wav.numpy()
 
-    def say(self, text, speaker=None, accent=True, numbers=True, sr=None, gap=0.25):
+    def say(self, text, speaker=None, accent=True, numbers=True, sr=None, gap=0.25,
+            pause=None):
         speaker = speaker or self.a.speaker
         sr = sr or self.a.sr
-        key = (text, speaker, accent, numbers, sr)
+        pause = self.a.pause_max if pause is None else pause
+        key = (text, speaker, accent, numbers, sr, pause)
         with self.lock:
             hit = self.cache.get(key)
             if hit is not None:
@@ -120,7 +124,7 @@ class Engine:
             marks.append(m)
             lost += bad
             with self.sem:
-                w = self._one(m, speaker)
+                w = self._one(m, speaker, pause)
             if i:
                 parts.append(np.zeros(int(gap * self.SR), dtype=np.float32))
             parts.append(w)
@@ -170,7 +174,9 @@ class Handler(BaseHTTPRequestHandler):
                              speaker=(q.get("speaker") or [None])[0],
                              accent=(q.get("accent", ["1"])[0] != "0"),
                              numbers=(q.get("numbers", ["1"])[0] != "0"),
-                             sr=int((q.get("sr") or [self.eng.a.sr])[0]))
+                             sr=int((q.get("sr") or [self.eng.a.sr])[0]),
+                             pause=float((q.get("pause") or
+                                          [self.eng.a.pause_max])[0]))
         except Exception as exc:                       # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -317,6 +323,8 @@ def main():
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--workers", type=int, default=4, help="одновременных синтезов")
     ap.add_argument("--cache-mb", type=float, default=200.0)
+    ap.add_argument("--pause-max", type=float, default=0.5,
+                    help="потолок паузы на точке внутри фразы, с (0 — как у модели)")
     ap.add_argument("--ruaccent-dir", default="/ruaccent")
     ap.add_argument("--accent-model", default="turbo3.1")
     ap.add_argument("--no-accent", action="store_true", help="без RUAccent (старт за 2 с)")

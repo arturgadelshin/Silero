@@ -46,6 +46,25 @@ def predict(tm, seq, sp):
     return mask, dur, pitch
 
 
+def cap_pauses(tm, seq, dur, max_sec):
+    """Потолок паузы на знаках препинания, секунды (0 — не трогать).
+
+    dur_predictor отводит точке 71 кадр — 0.89 с. Между отдельными фразами
+    так и надо, но внутри одной фразы (а туда точка попадает, когда короткий
+    огрызок приклеен к соседу — см. split_text) это слышно как провал.
+    Запятой и прочей мелочи потолок не мешает: им модель даёт 5 кадров.
+    Исходный тензор не меняется.
+    """
+    if not max_sec:
+        return dur
+    lim = float(max(1, round(max_sec * SR / HOP)))
+    dur = dur.clone()
+    for i, c in enumerate(seq[0].tolist()):
+        if c in tm.punkt_symbols and dur[..., i].item() > lim:
+            dur[..., i] = lim
+    return dur
+
+
 def synth(tm, seq, sp, mask, dur, pitch):
     mel = tm.tacotron(seq, sp, mask, dur, pitch, None)
     wav = tm.vocoder(mel, SR, 0.0, True)

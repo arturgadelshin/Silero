@@ -41,6 +41,12 @@ def test_pipe_is_a_hard_break():
     assert split_text(LONG1 + " | " + LONG2) == [LONG1, LONG2]
 
 
+def test_glue_does_not_jump_over_a_pipe():
+    # «|» ставят руками там, где нужна пауза: короткий огрызок за ним
+    # приклеиваться к предыдущей фразе не должен
+    assert split_text(LONG1 + " | Ага.") == [LONG1, "Ага."]
+
+
 def test_empty_text_survives():
     assert split_text("   ") == [""]
 
