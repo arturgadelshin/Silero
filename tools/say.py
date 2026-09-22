@@ -105,7 +105,7 @@ def main():
         open(a.dump_text, "w", encoding="utf-8").write("\n".join(marked) + "\n")
     print(f"\n{a.out}: {len(y) / SR:.1f} с, пик {20 * np.log10(np.abs(y).max() + 1e-9):+.1f} дБ"
           + (f", CER по строкам {100 * total_cer / max(n, 1):.2f} %" if n else ""))
-    print(f"время: модель {t_model:.1f} с, RUAccent {t_acc:.1f} с, синтез {t_synth:.1f} с "
+    print(f"время: модель {t_model:.1f} с, {a.accent_engine} {t_acc:.1f} с, синтез {t_synth:.1f} с "
           f"на {t_speech:.1f} с речи (RTF {t_synth / max(t_speech, 1e-9):.3f}), "
           f"потоков {torch.get_num_threads()}")
 
