@@ -1,8 +1,13 @@
 """text.py — подготовка русского текста к синтезу.
 
-Порядок один и тот же везде: числа словами (voice.numbers) -> pre_ruaccent ->
-RUAccent -> post_ruaccent -> fix_known. Silero получает текст с «+» перед
-ударной гласной и без символов вне своего алфавита.
+Числа словами (voice.numbers), потом разметка ударений, потом символы Silero:
+текст с «+» перед ударной гласной и без символов вне алфавита из 47 знаков.
+
+Разметчиков два, интерфейс у них общий (вызов от строки):
+  Stress — silero-stress, MIT, грузится 3.8 с, 6 мс на фразу, сеть не нужна;
+  Accent — RUAccent, 26 с и докачка моделей koziev в site-packages.
+На сверке с авторскими «+» RUSLAN они идут вровень (99.41 против 99.33 %),
+разница в 17 словах на 1152 фразы. Подробности в SILERO.md.
 """
 import re
 
@@ -60,9 +65,13 @@ def pre_ruaccent(t):
     return re.sub(r"\s+", " ", t).strip()
 
 
-def post_ruaccent(t):
-    """обратно к символам Silero: «...» -> «…», отдельно стоящий « - » -> « – »"""
+def post_accent(t):
+    """к символам Silero: «...» -> «…», отдельно стоящий « - » -> « – »,
+    знак препинания вплотную к слову. Последнее — не косметика: silero-stress
+    отбивает точку пробелом («харб+ина .»), и это лишний символ в токенах,
+    со своей длительностью; в корпусе шага 1 такого нет ни разу."""
     t = re.sub(r"\.\.\.+", "…", t)
+    t = re.sub(r"\s+([.,!?;:…])", r"\1", t)
     t = re.sub(r"(^|\s)-(\s|$)", r"\1–\2", t)
     # реплика диалога «–Недавно…» без пробела: дефис в начале слова — всегда тире
     t = re.sub(r"(^|\s)-(?=\S)", r"\1– ", t)
@@ -148,11 +157,48 @@ class Accent:
         patch_token_type_ids(self.acc.accent_model.session)
 
     def __call__(self, s):
-        return fix_known(post_ruaccent(self.acc.process_all(pre_ruaccent(s))))
+        return fix_known(post_accent(self.acc.process_all(pre_ruaccent(s))))
+
+
+class Stress:
+    """silero-stress (MIT): «+» перед ударной гласной, омографы и «ё».
+
+    Пунктуацию не трогает — ни «…», ни «—», ни U+2011, — поэтому обвязки
+    pre_ruaccent ему не надо, остаётся привести «...» и «-» к символам
+    Silero. Кавычки и скобки Silero всё равно выкинет, но убрать их надо
+    заранее, иначе «(нет)» прилипнет к соседнему слову.
+
+    yo_homo — угадывать «ё» в неоднозначных словах. Включено: так же ведёт
+    себя RUAccent (58 раз «все» -> «всё» на корпусе у обоих), и на этом
+    обучена модель. Цена — промахи вроде «Все всё поняли» -> «Всё всё…».
+    """
+
+    def __init__(self, yo_homo=True):
+        from silero_stress import load_accentor
+        self.acc = load_accentor()
+        self.yo_homo = yo_homo
+
+    def __call__(self, s):
+        s = s.replace("́", "").replace("’", "")     # авторское ударение, апостроф
+        s = s.replace("‑", "-").replace("‐", "-")  # U+2011/U+2010 Silero выкинет
+        s = re.sub(r"[«»„“”\"()\[\]]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return post_accent(self.acc(s, put_yo_homo=self.yo_homo))
+
+
+def accentor(engine="silero", model="turbo3.1", workdir="/ruaccent"):
+    """разметчик по имени: silero | ruaccent | none"""
+    if engine in ("none", "", None):
+        return None
+    if engine == "ruaccent":
+        return Accent(model, workdir)
+    if engine == "silero":
+        return Stress()
+    raise ValueError(f"неизвестный разметчик: {engine}")
 
 
 def prepare(s, accent=None, numbers=True):
-    """полный путь текста до входа Silero; accent — Accent или None"""
+    """полный путь текста до входа Silero; accent — Stress, Accent или None"""
     if numbers:
         from voice.numbers import expand
         s = expand(s)

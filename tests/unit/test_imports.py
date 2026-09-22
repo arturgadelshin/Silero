@@ -14,7 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MODULES = ["voice.model", "voice.audio", "voice.text", "voice.numbers", "voice.asr",
            "voice.paths", "voice.phrases", "voice.targets",
            "service.tts", "train.train", "train.pipeline", "train.bake_prosody",
-           "train.prep_text", "train.prep_targets", "train.gen_f5",
+           "train.prep_text", "train.prep_targets", "train.gen_f5", "train.refresh",
            "tools.say", "tools.asr_scan", "probe.probe1", "probe.probe2",
            "probe.diag_voice", "probe.prosody_try"]
 

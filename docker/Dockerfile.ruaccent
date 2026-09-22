@@ -1,4 +1,6 @@
-# silero_ru: kws_tts (torch, f5_tts, librosa) + RUAccent для ударений и «ё».
-# Модели RUAccent качаются при первом load() — каталог кэша монтируется снаружи.
+# silero_ru: kws_tts (torch, f5_tts, librosa) + два разметчика ударений.
+# silero-stress (MIT) — основной: грузится 3.8 с, сети не просит.
+# RUAccent — запасной, им размечен корпус шага 1; модели качает при первом
+# load(), каталог кэша монтируется снаружи.
 FROM kws_tts
-RUN pip install --no-cache-dir ruaccent
+RUN pip install --no-cache-dir silero-stress ruaccent

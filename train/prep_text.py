@@ -4,12 +4,13 @@
 Одна строка на фразу, одинаковая для обеих моделей: F5_RUSSIAN и Silero
 понимают «+» ПЕРЕД ударной гласной. Ударения ставятся в два слоя:
 
-  1. RUAccent (Den4ikAI/ruaccent) — ударения и «ё» во всех словах, где уверен;
+  1. разметчик --engine: silero-stress (по умолчанию) или RUAccent — ударения,
+     омографы и «ё» во всех словах, где уверен;
   2. акцентор Silero поверх — слова с «+» он не трогает (models/accentor.py:
      «If word already have stress, we won't process it again»), а дописывает
-     то, что RUAccent оставил без ударения: односложные слова
-     (stress_single_vowel) и пропуски. Так строка совпадает с тем, что Silero
-     видел бы у себя в apply_tts, и F5 читает ту же строку.
+     оставшееся без ударения: односложные слова (stress_single_vowel) и
+     пропуски. Так строка совпадает с тем, что Silero видел бы у себя в
+     apply_tts, и F5 читает ту же строку.
 
 Итоговая строка проходит через prepare_text_input Silero без изменений
 (иначе символ вне алфавита Silero выпал бы из токенов, а в звуке F5 остался).
@@ -31,7 +32,7 @@ import random
 import re
 
 from voice.paths import data
-from voice.text import Accent, stress_map, syllables
+from voice.text import accentor, stress_map, syllables
 
 # темп RUSLAN по оценке — слогов в секунду; уточняется по F5 на шаге 3
 SYL_PER_SEC = 4.5
@@ -47,7 +48,9 @@ def main():
     ap.add_argument("--src", default=data("ruslan"))
     ap.add_argument("--out", default=data("ruslan"))
     ap.add_argument("--ruaccent-dir", default="/ruaccent")
-    ap.add_argument("--model", default="turbo3.1")
+    ap.add_argument("--engine", default="silero", choices=["silero", "ruaccent"],
+                    help="разметчик ударений")
+    ap.add_argument("--model", default="turbo3.1", help="модель омографов RUAccent")
     ap.add_argument("--hours", type=float, default=2.0, help="сколько часов речи отобрать")
     ap.add_argument("--min-sec", type=float, default=2.0)
     ap.add_argument("--max-sec", type=float, default=12.0)
@@ -65,7 +68,7 @@ def main():
     symbols = pk.symbols
     alphabet = set(symbols[3:])
 
-    acc = Accent(a.model, a.ruaccent_dir)
+    acc = accentor(a.engine, a.model, a.ruaccent_dir)
 
     rows = read_tsv(os.path.join(a.src, "ruslan.tsv"))
     if a.limit:

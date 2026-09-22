@@ -77,3 +77,21 @@ def test_pause_cap_shortens_a_period_inside_a_phrase(tts):
     letters = [i for i in range(seq.shape[1]) if i not in punkt]
     assert all(capped[..., i].item() == dur[..., i].item() for i in letters)
     assert max(dur[..., i].item() for i in punkt) * HOP / SR > lim
+
+
+def test_silero_stress_marks_the_way_silero_expects():
+    """приёмка разметчика: «+» перед ударной гласной, омографы, «ё»"""
+    from voice.text import Stress
+    try:
+        acc = Stress()
+    except ImportError:
+        pytest.skip("silero-stress не установлен")
+    out = acc("Замок на двери и замок на горе")
+    assert "зам+ок н+а двер+и" in out.lower()      # который вешают
+    assert "з+амок н+а гор+е" in out.lower()       # который стоит
+    assert acc("Лева Королев") == "Л+ёва Корол+ёв"
+    assert acc("Он ушёл...") == "+Он уш+ёл…"       # символы Silero на выходе
+    assert acc("«Макса» — дом") == "М+акса — д+ом"
+    # U+2011 приводим к обычному дефису, иначе Silero молча съест его вместе
+    # с соседями; односложное «по» помечается как любое односложное слово
+    assert acc("по‑английски") == "п+о-англ+ийски"

@@ -5,7 +5,8 @@
 модули — pipeline только подставляет пути и печатает команду перед запуском,
 чтобы любую ступень можно было повторить руками:
 
-  text     шаг 1  тексты RUSLAN с ударениями            (CPU, сеть для RUAccent)
+  text     шаг 1  тексты RUSLAN с ударениями            (CPU)
+  refresh  выбросить звук и цели переразмеченных фраз  (CPU, нужен --old)
   f5       шаг 3/4 озвучка корпуса клоном F5            (GPU, сеть для gigaam)
   targets  шаг 5  цели: мел, длительности, pitch        (CPU, части параллельно)
   stats    шаг 5  второй проход: μ, σ F0 и маска мела   (CPU)
@@ -29,13 +30,15 @@ import sys
 
 from voice.paths import data
 
-ORDER = ["text", "f5", "targets", "stats", "stage1", "stage2", "bake", "check"]
+ORDER = ["text", "refresh", "f5", "targets", "stats", "stage1", "stage2",
+         "bake", "check"]
 
 
 def steps(a):
     parts = [["-m", "train.prep_targets", "--part", f"{i}/{a.parts}"] for i in range(a.parts)]
     return {
         "text": [["-m", "train.prep_text"]],
+        "refresh": [["-m", "train.refresh", "--old", a.old, "--run"]] if a.old else [],
         "f5": [["-m", "train.gen_f5"]],
         "targets": parts,
         "stats": [["-m", "train.prep_targets", "--stats"]],
@@ -52,6 +55,7 @@ def main():
     ap.add_argument("--from", dest="start", default="text", choices=ORDER)
     ap.add_argument("--to", dest="stop", default="check", choices=ORDER)
     ap.add_argument("--only", default="", help="одна ступень вместо диапазона")
+    ap.add_argument("--old", default="", help="прежний texts.tsv для ступени refresh")
     ap.add_argument("--parts", type=int, default=6, help="на сколько частей делить targets")
     ap.add_argument("--jobs", type=int, default=6, help="сколько частей targets считать разом")
     ap.add_argument("--run", action="store_true", help="не печатать план, а выполнять")

@@ -1,7 +1,7 @@
-"""Подготовка текста: резка на фразы, разметка вокруг RUAccent, CER."""
+"""Подготовка текста: резка на фразы, обвязка разметчиков ударений, CER."""
 import pytest
 
-from voice.text import (cer, fix_known, norm_text, outside, post_ruaccent,
+from voice.text import (cer, fix_known, norm_text, outside, post_accent,
                         pre_ruaccent, split_text, syllables, utf8_or_cp1251)
 
 ALPHABET = set(" абвгдеёжзийклмнопрстуфхцчшщъыьэюя+.,!?–…:;-")
@@ -84,14 +84,14 @@ def test_pre_ruaccent_normalises_dashes_and_quotes():
     assert "по-английски" in out
 
 
-def test_post_ruaccent_returns_silero_symbols():
-    assert post_ruaccent("дом ... и") == "дом … и"
-    assert post_ruaccent("дом - это") == "дом – это"
-    assert post_ruaccent("-Недавно") == "– Недавно"
+def test_post_accent_returns_silero_symbols():
+    assert post_accent("дом ... и") == "дом… и"        # знак липнет к слову
+    assert post_accent("дом - это") == "дом – это"
+    assert post_accent("-Недавно") == "– Недавно"
 
 
 def test_roundtrip_keeps_ellipsis_and_dash():
-    out = post_ruaccent(pre_ruaccent("Он ушёл — молча…"))
+    out = post_accent(pre_ruaccent("Он ушёл — молча…"))
     assert "–" in out and "…" in out
 
 
@@ -108,3 +108,20 @@ def test_syllables_counts_vowels():
 def test_cp1251_fallback():
     assert utf8_or_cp1251("Который час".encode("cp1251")) == "Который час"
     assert utf8_or_cp1251("Который час".encode("utf-8")) == "Который час"
+
+
+def test_accentor_picks_an_engine_by_name():
+    from voice.text import Accent, Stress, accentor
+    assert accentor("none") is None
+    with pytest.raises(ValueError):
+        accentor("руаксент")
+    # сами движки не грузим: это секунды и модели, им место в приёмке
+    assert Stress.__call__ is not Accent.__call__
+
+
+def test_post_accent_glues_punctuation_to_the_word():
+    # silero-stress отбивает знак пробелом, а в корпусе шага 1 такого нет
+    assert post_accent("харб+ина .") == "харб+ина."
+    assert post_accent("казб+ек ?") == "казб+ек?"
+    assert post_accent("сл+ово …") == "сл+ово…"
+    assert post_accent("говор+ит – з+ачем") == "говор+ит – з+ачем"   # тире не трогаем

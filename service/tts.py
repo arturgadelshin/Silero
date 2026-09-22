@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """tts.py — всегда прогретый TTS своим голосом: HTTP и wyoming.
 
-Всё дорогое делается один раз на старте: модель (2 с), RUAccent (25 с) и
-прогрев jit (первые два синтеза идут по секунде, третий уже 24 мс). Дальше на
-запрос остаётся разметка (13 мс медиана) и синтез (RTF 0.05), то есть фраза на
-три секунды готова примерно за 0.17 с.
+Всё дорогое делается один раз на старте: модель (2 с), разметчик ударений
+(silero-stress 4 с, RUAccent 26 с) и прогрев jit (первые два синтеза идут по
+секунде, третий уже 24 мс). Дальше на запрос остаётся разметка (6 мс) и
+синтез (RTF 0.05), то есть фраза на три секунды готова примерно за 0.15 с.
 
 Два входа в один и тот же движок:
   HTTP      POST /say (тело — текст или JSON) и GET /say?text=… -> WAV;
@@ -41,7 +41,8 @@ from voice.audio import pcm_bytes, resample, wav_from_pcm
 from voice.model import (SR, cap_pauses, encode, load, load_state, predict,
                          synth)
 from voice.paths import data
-from voice.text import Accent, outside, prepare, split_text, utf8_or_cp1251
+from voice.text import (accentor, outside, prepare, split_text,
+                        utf8_or_cp1251)
 
 VERSION = "1.0"
 
@@ -60,7 +61,7 @@ class Engine:
         t_acc = 0.0
         if not a.no_accent:
             t0 = time.time()
-            self.acc = Accent(a.accent_model, a.ruaccent_dir)
+            self.acc = accentor(a.accent_engine, a.accent_model, a.ruaccent_dir)
             t_acc = time.time() - t0
 
         self.a = a
@@ -74,7 +75,7 @@ class Engine:
         # прогрев обязательно в отдельном потоке: оптимизация jit срабатывает на
         # третьем прогоне и не переносится из главного потока — иначе первый
         # настоящий запрос платит 1.3 с вместо 0.17
-        # разметку греем тем же вызовом: первый process_all у RUAccent дороже
+        # разметку греем тем же вызовом: первый вызов разметчика дороже
         # остальных (модель омографов), и это тоже секунда на первом запросе
         def warm():
             for k in range(3):
@@ -84,7 +85,7 @@ class Engine:
         w.start()
         w.join()
         self.stat.update(requests=0, speech_sec=0.0, synth_sec=0.0, cache_hits=0)
-        print(f"готов: модель {t_model:.1f} с, RUAccent {t_acc:.1f} с, "
+        print(f"готов: модель {t_model:.1f} с, {a.accent_engine} {t_acc:.1f} с, "
               f"прогрев {time.time() - t0:.1f} с; голос {a.speaker}, "
               f"одновременно {a.workers}", flush=True)
 
@@ -326,7 +327,9 @@ def main():
     ap.add_argument("--pause-max", type=float, default=0.5,
                     help="потолок паузы на точке внутри фразы, с (0 — как у модели)")
     ap.add_argument("--ruaccent-dir", default="/ruaccent")
-    ap.add_argument("--accent-model", default="turbo3.1")
+    ap.add_argument("--accent-engine", default="silero", choices=["silero", "ruaccent"],
+                    help="разметчик ударений: silero-stress или RUAccent")
+    ap.add_argument("--accent-model", default="turbo3.1", help="модель омографов RUAccent")
     ap.add_argument("--no-accent", action="store_true", help="без RUAccent (старт за 2 с)")
     a = ap.parse_args()
 

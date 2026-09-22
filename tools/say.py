@@ -2,9 +2,9 @@
 """say.py — озвучить готовый текст обученной моделью.
 
 Строка файла = одна реплика, пустая строка = удлинённая пауза. Текст проходит
-ту же подготовку, что корпус шага 1 (`pre_ruaccent`/`post_ruaccent` +
-RUAccent), поэтому «…», «–» и «ё» доживают до токенов, а кавычки и скобки не
-слипаются со словами. Символы вне алфавита Silero — ошибка, а не молчаливая
+ту же подготовку, что корпус шага 1 (разметчик ударений и `post_accent`),
+поэтому «…», «–» и «ё» доживают до токенов, а кавычки и скобки не слипаются
+со словами. Символы вне алфавита Silero — ошибка, а не молчаливая
 потеря: цифры и латиницу надо раскрывать словами в исходном тексте.
 
   docker run --rm --network host -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
@@ -24,7 +24,7 @@ from voice.asr import transcribe_wav48
 from voice.audio import write16
 from voice.model import SR, encode, load, load_state, predict, synth
 from voice.paths import data
-from voice.text import Accent, cer, outside
+from voice.text import accentor, cer, outside
 
 
 def main():
@@ -37,7 +37,8 @@ def main():
     ap.add_argument("--gap", type=float, default=0.35, help="пауза между строками, с")
     ap.add_argument("--par-gap", type=float, default=0.8, help="пауза на пустой строке, с")
     ap.add_argument("--ruaccent-dir", default="/ruaccent")
-    ap.add_argument("--accent-model", default="turbo3.1")
+    ap.add_argument("--accent-engine", default="silero", choices=["silero", "ruaccent"])
+    ap.add_argument("--accent-model", default="turbo3.1", help="модель омографов RUAccent")
     ap.add_argument("--no-accent", action="store_true",
                     help="текст уже с «+»: не грузить RUAccent вовсе")
     ap.add_argument("--dump-text", default="", help="куда сложить размеченный текст")
@@ -56,7 +57,7 @@ def main():
     acc = None
     if not a.no_accent:
         t0 = time.time()
-        acc = Accent(a.accent_model, a.ruaccent_dir)
+        acc = accentor(a.accent_engine, a.accent_model, a.ruaccent_dir)
         t_acc = time.time() - t0
     else:
         t_acc = 0.0
