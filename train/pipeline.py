@@ -15,11 +15,14 @@
   bake     просодия: растяжка pitch в веса              (CPU)
   check    приёмка обученной модели по CER gigaam       (CPU, --network host)
 
-  docker run --rm --gpus all --network host \
+  docker run --rm --gpus all --network host -e HF_HUB_OFFLINE=1 \
     -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
-    -v ~/linkplay/tmp/silero/ruaccent:/ruaccent \
+    -v ~/linkplay/tmp/hf:/root/.cache/huggingface \
     -v ~/linkplay/silero:/app -v ~/linkplay/tmp/silero:/w -w /app \
-    silero_ru python -m train.pipeline --from targets
+    silero_ru python -m train.pipeline --from f5 --run
+
+Ступени f5 и stage* просят GPU, gigaam для приёмки слушает 127.0.0.1:10407,
+поэтому --network host. Кэш huggingface нужен только ступени f5.
 
 Обучение занимает слот RTX 3070 надолго, поэтому по умолчанию печатается план,
 а запускается он только с --run.
