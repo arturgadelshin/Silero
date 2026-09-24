@@ -48,6 +48,26 @@ from voice.text import (accentor, outside, prepare, split_text,
 VERSION = "1.0"
 
 
+SERVICE = [".", "..", "/", "w", "opt", "tmp", "home", "app", "voice", "voices",
+           "models", "model", "train", "silero"]
+
+
+def voice_label(path, speaker):
+    """Подпись голоса в Home Assistant.
+
+    Раньше в info() стояло жёсткое «свой голос», и два инстанса — artur дома
+    и stalker на другом сервере — в списке HA было не различить. Берём имя из
+    пути к весам: `voices/stalker/model_voice.pt` -> «stalker». Если путь
+    служебный (`/w/train/model_voice.pt`), брать нечего — остаётся имя строки
+    модели, и тогда подпись задают ключом --voice-label.
+    """
+    parts = os.path.normpath(path).replace("\\", "/").split("/")[:-1]
+    for d in reversed(parts):
+        if d and d.lower() not in SERVICE:
+            return d
+    return speaker
+
+
 class Job:
     """идущий прямо сейчас синтез одной фразы: на нём ждут все, кто попросил
     то же самое, пока он не доложит результат (res) или ошибку (err)"""
@@ -99,7 +119,8 @@ class Engine:
         w.join()
         self.stat.update(requests=0, speech_sec=0.0, synth_sec=0.0, cache_hits=0)
         print(f"готов: модель {t_model:.1f} с, {a.accent_engine} {t_acc:.1f} с, "
-              f"прогрев {time.time() - t0:.1f} с; голос {a.speaker}, "
+              f"прогрев {time.time() - t0:.1f} с; голос {getattr(a, 'voice_label', a.speaker)} "
+              f"(строка {a.speaker}), "
               f"одновременно {a.workers}", flush=True)
 
     # ---------------------------------------------------------------- текст
@@ -263,11 +284,14 @@ class Handler(BaseHTTPRequestHandler):
             s["uptime_sec"] = round(time.time() - s.pop("started"), 1)
             s["rtf"] = round(s["synth_sec"] / max(s["speech_sec"], 1e-9), 3)
             s["speaker"] = self.eng.a.speaker
+            s["voice"] = self.eng.a.voice_label
             s["cache_mb"] = round(self.eng.cache_bytes / 1e6, 1)
             return self._json(s)
         if u.path == "/voices":
             return self._json({"speakers": list(self.eng.pk.speakers),
-                               "own": self.eng.a.speaker, "sr": self.eng.a.sr})
+                               "own": self.eng.a.speaker,
+                               "voice": self.eng.a.voice_label,
+                               "sr": self.eng.a.sr})
         if u.path == "/say":
             return self._say((q.get("text") or [""])[0], q)
         self._json({"error": "нет такого пути", "пути": ["/say", "/health", "/voices"]}, 404)
@@ -307,15 +331,27 @@ class Wyoming(socketserver.StreamRequestHandler):
         self.wfile.flush()
 
     def info(self):
+        """Свой голос и четыре стоковых Silero.
+
+        Имя голоса — строка модели (xenia и прочие), его HA возвращает в
+        synthesize; менять его нельзя, иначе у уже настроенного HA отвалится
+        выбранный голос. Различают их описания: свой подписан именем из
+        --voice-label, стоковые — прямо так и подписаны.
+        """
         att = {"name": "silero + f5 clone", "url": "https://github.com/snakers4/silero-models"}
-        voice = {"name": self.eng.a.speaker, "description": "свой голос",
-                 "attribution": att, "installed": True, "version": VERSION,
-                 "languages": ["ru"], "speakers": None}
+        own = self.eng.a.speaker
+        names = [own] + [s for s in self.eng.pk.speakers if s != own]
+        voices = [{"name": s,
+                   "description": self.eng.a.voice_label if s == own
+                   else f"{s}, стоковый Silero",
+                   "attribution": att, "installed": True, "version": VERSION,
+                   "languages": ["ru"], "speakers": None} for s in names]
         return {"asr": [], "wake": [], "handle": [], "intent": [], "mic": [], "snd": [],
                 "satellite": None,
-                "tts": [{"name": "silero-own", "description": "Silero v5_5_ru, свой голос",
+                "tts": [{"name": "silero-own",
+                         "description": f"Silero v5_5_ru, голос {self.eng.a.voice_label}",
                          "attribution": att, "installed": True, "version": VERSION,
-                         "voices": [voice], "supports_synthesize_streaming": False}]}
+                         "voices": voices, "supports_synthesize_streaming": False}]}
 
     def handle(self):
         while True:
@@ -367,6 +403,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=data("train/model_voice.pt"))
     ap.add_argument("--speaker", default="xenia", help="строка обученного голоса")
+    ap.add_argument("--voice-label", default="", help="подпись голоса в HA; по "
+                    "умолчанию имя каталога весов (voices/stalker -> stalker)")
     ap.add_argument("--row", type=int, default=4)
     ap.add_argument("--sr", type=int, default=48000, help="частота ответа HTTP")
     ap.add_argument("--wyoming-sr", type=int, default=22050)
@@ -383,6 +421,7 @@ def main():
     ap.add_argument("--accent-model", default="turbo3.1", help="модель омографов RUAccent")
     ap.add_argument("--no-accent", action="store_true", help="без RUAccent (старт за 2 с)")
     a = ap.parse_args()
+    a.voice_label = a.voice_label or voice_label(a.model, a.speaker)
 
     eng = Engine(a)
     Handler.eng = eng

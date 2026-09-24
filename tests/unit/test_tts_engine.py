@@ -106,3 +106,31 @@ def test_failure_does_not_start_a_stampede():
     with pytest.raises(ValueError):
         e.say("одна фраза на всех")
     assert len(e.calls) == 2
+
+
+def test_voice_label_comes_from_the_weights_path():
+    from service.tts import voice_label
+    # так лежит голос в образе и в репозитории
+    assert voice_label("/opt/voices/stalker/model_voice.pt", "xenia") == "stalker"
+    assert voice_label("voices/artur/model_voice.pt", "xenia") == "artur"
+    # служебный путь: брать нечего, остаётся строка модели
+    assert voice_label("/w/train/model_voice.pt", "xenia") == "xenia"
+    assert voice_label("model_voice.pt", "xenia") == "xenia"
+    # морда кладёт голоса по идентификатору — он и станет подписью
+    assert voice_label("/w/web/models/1a0ce5153aa68be/train/model_voice.pt",
+                       "xenia") == "1a0ce5153aa68be"
+
+
+def test_wyoming_info_lists_all_voices_with_own_first():
+    from service.tts import Wyoming
+    eng = types.SimpleNamespace(
+        a=types.SimpleNamespace(speaker="xenia", voice_label="stalker"),
+        pk=types.SimpleNamespace(speakers=["aidar", "baya", "kseniya",
+                                           "eugene", "xenia"]))
+    info = Wyoming.info(types.SimpleNamespace(eng=eng))
+    voices = info["tts"][0]["voices"]
+    # имена — строки модели: их HA возвращает в synthesize, менять нельзя
+    assert [v["name"] for v in voices] == ["xenia", "aidar", "baya", "kseniya", "eugene"]
+    assert voices[0]["description"] == "stalker"     # свой — первым и по имени
+    assert all("стоковый" in v["description"] for v in voices[1:])
+    assert "stalker" in info["tts"][0]["description"]

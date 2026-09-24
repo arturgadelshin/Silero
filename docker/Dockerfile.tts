@@ -31,8 +31,10 @@ WORKDIR /app
 COPY voice/ /app/voice/
 COPY service/ /app/service/
 # голос запекаем внутрь: на целевом сервере репозитория рядом не будет, и
-# монтировать нечего (в service/compose.yml код и веса приходят с хоста)
-COPY voices/stalker/model_voice.pt /opt/voice/model_voice.pt
+# монтировать нечего (в service/compose.yml код и веса приходят с хоста).
+# Имя каталога не случайно: из него сервис берёт подпись голоса для Home
+# Assistant, иначе в списке HA два инстанса не различить
+COPY voices/stalker/model_voice.pt /opt/voices/stalker/model_voice.pt
 
 # хаб-кэш Silero нужен даже с готовыми весами: load() всегда идёт в
 # torch.hub за пакетом v5_5_ru (символы алфавита, список голосов, сам jit).
@@ -42,4 +44,4 @@ RUN python -c "from voice.model import load; load()" \
  && python -c "from voice.text import Stress; print(Stress()('Проверка сборки'))"
 
 EXPOSE 10500 10501
-CMD ["python", "-m", "service.tts", "--model", "/opt/voice/model_voice.pt"]
+CMD ["python", "-m", "service.tts", "--model", "/opt/voices/stalker/model_voice.pt"]

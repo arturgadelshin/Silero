@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
     command: >
       python -m service.tts
-      --model /opt/voice/model_voice.pt
+      --model /opt/voices/stalker/model_voice.pt
       --http-port ${SILERO_HTTP_PORT:-10502}
       --wyoming-port ${SILERO_WYOMING_PORT:-10503}
       --workers ${SILERO_WORKERS:-16}
