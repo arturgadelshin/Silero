@@ -16,6 +16,7 @@
 Синтез однопоточный (torch.set_num_threads в этом образе не действует), но
 потоки Python работают параллельно: тяжёлые куски внутри torch отпускают GIL.
 Одновременных синтезов не больше `--workers`, остальные ждут в очереди.
+Одинаковый текст в один момент считается один раз: см. Engine.say.
 
   docker run -d --restart unless-stopped --name silero_tts --network host \
     -v ~/linkplay/tmp/silero/hub:/root/.cache/torch/hub \
@@ -47,6 +48,17 @@ from voice.text import (accentor, outside, prepare, split_text,
 VERSION = "1.0"
 
 
+class Job:
+    """идущий прямо сейчас синтез одной фразы: на нём ждут все, кто попросил
+    то же самое, пока он не доложит результат (res) или ошибку (err)"""
+    __slots__ = ("done", "res", "err")
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.res = None
+        self.err = None
+
+
 class Engine:
     def __init__(self, a):
         self.SR = SR
@@ -69,6 +81,7 @@ class Engine:
         self.lock = threading.Lock()
         self.cache = OrderedDict()
         self.cache_bytes = 0
+        self.inflight = {}
         self.stat = {"requests": 0, "speech_sec": 0.0, "synth_sec": 0.0,
                      "cache_hits": 0, "started": time.time()}
         t0 = time.time()
@@ -105,19 +118,7 @@ class Engine:
             _, wav = synth(self.tm, seq, sp, mask, dur, pitch)
             return wav.numpy()
 
-    def say(self, text, speaker=None, accent=True, numbers=True, sr=None, gap=0.25,
-            pause=None):
-        speaker = speaker or self.a.speaker
-        sr = sr or self.a.sr
-        pause = self.a.pause_max if pause is None else pause
-        key = (text, speaker, accent, numbers, sr, pause)
-        with self.lock:
-            hit = self.cache.get(key)
-            if hit is not None:
-                self.cache.move_to_end(key)
-                self.stat["cache_hits"] += 1
-                self.stat["requests"] += 1
-                return hit
+    def _render(self, text, speaker, accent, numbers, sr, gap, pause):
         t0 = time.time()
         parts, marks, lost = [], [], []
         for i, s in enumerate(split_text(text)):
@@ -132,9 +133,54 @@ class Engine:
         x = np.concatenate(parts)
         if sr != self.SR:
             x = resample(x, self.SR, sr)
-        res = {"pcm": pcm_bytes(x), "sr": sr, "sec": len(x) / sr,
-               "text": " ".join(marks), "lost": sorted(set(lost)),
-               "synth_sec": time.time() - t0}
+        return {"pcm": pcm_bytes(x), "sr": sr, "sec": len(x) / sr,
+                "text": " ".join(marks), "lost": sorted(set(lost)),
+                "synth_sec": time.time() - t0}
+
+    def say(self, text, speaker=None, accent=True, numbers=True, sr=None, gap=0.25,
+            pause=None):
+        """Готовый ответ из кэша, ожидание чужого синтеза той же фразы — или
+        свой синтез.
+
+        Среднее звено — не украшение. Кэш заполняется только после синтеза,
+        поэтому рассылка на двести колонок одной фразой (а автоматизации
+        оповещают именно так) приходила одним мгновенным залпом, в кэш никто
+        не попадал, и сорок с лишним потоков считали одно и то же. Замеры на
+        72 ядрах: из 200 одинаковых запросов кэшем отвечали 158 (HTTP) и 165
+        (wyoming), остальные синтезировали заново. Теперь первый считает,
+        прочие ждут его на Job и забирают тот же самый ответ.
+        """
+        speaker = speaker or self.a.speaker
+        sr = sr or self.a.sr
+        pause = self.a.pause_max if pause is None else pause
+        key = (text, speaker, accent, numbers, sr, pause)
+        with self.lock:
+            hit = self.cache.get(key)
+            if hit is not None:
+                self.cache.move_to_end(key)
+                self.stat["cache_hits"] += 1
+                self.stat["requests"] += 1
+                return hit
+            job = self.inflight.get(key)
+            mine = job is None
+            if mine:
+                job = self.inflight[key] = Job()
+        if not mine:
+            job.done.wait()
+            if job.err is not None:                    # считавший упал — падаем с ним,
+                raise job.err                          # чтобы не ломиться толпой следом
+            with self.lock:
+                self.stat["cache_hits"] += 1
+                self.stat["requests"] += 1
+            return job.res
+        try:
+            res = self._render(text, speaker, accent, numbers, sr, gap, pause)
+        except BaseException as exc:                   # noqa: BLE001
+            job.err = exc
+            with self.lock:
+                self.inflight.pop(key, None)
+            job.done.set()
+            raise
         with self.lock:
             self.stat["requests"] += 1
             self.stat["speech_sec"] += res["sec"]
@@ -144,6 +190,11 @@ class Engine:
             while self.cache_bytes > self.a.cache_mb * 1e6 and self.cache:
                 _, old = self.cache.popitem(last=False)
                 self.cache_bytes -= len(old["pcm"])
+            self.inflight.pop(key, None)
+        # ответ отдаём ждущим сами: к моменту их пробуждения он может быть уже
+        # вытеснен из кэша, если фразы длинные, а --cache-mb маленький
+        job.res = res
+        job.done.set()
         return res
 
 

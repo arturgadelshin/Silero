@@ -15,7 +15,7 @@ MODULES = ["voice.model", "voice.audio", "voice.text", "voice.numbers", "voice.a
            "voice.paths", "voice.phrases", "voice.targets",
            "service.tts", "train.train", "train.pipeline", "train.bake_prosody",
            "train.prep_text", "train.prep_targets", "train.gen_f5", "train.refresh",
-           "tools.say", "tools.asr_scan", "probe.probe1", "probe.probe2",
+           "tools.say", "tools.asr_scan", "tools.bench", "probe.probe1", "probe.probe2",
            "probe.diag_voice", "probe.prosody_try",
            "web.store", "web.jobs", "web.refprep", "web.engine", "web.register"]
 
