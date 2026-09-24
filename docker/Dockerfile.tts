@@ -1,0 +1,45 @@
+# silero_slim: только синтез, без обучения. Собирается от корня репозитория:
+#
+#   docker build -t silero_slim -f docker/Dockerfile.tts .
+#
+# Боевой образ silero_ru весит 11.9 ГБ — там CUDA, f5_tts, librosa, всё для
+# обучения. Пути синтеза из этого нужны четыре пакета: torch, torchaudio,
+# numpy, silero-stress. Отсюда ~2 ГБ вместо двенадцати.
+#
+# omegaconf тут не случайно: hubconf silero-models читает им models.yml,
+# и без него load() падает ModuleNotFoundError на первом же запуске.
+#
+# torchaudio не роскошь: Home Assistant просит 22050 Гц, модель отдаёт 48000,
+# и на каждый запрос wyoming зовётся resample() (voice/audio.py). Без него
+# HTTP-путь работал бы, а HA падал бы с ImportError — проверка «curl /say»
+# такую сборку пропустила бы.
+#
+# Версии torch прибиты: на 2.5.1 голос проверен, а jit-пакет Silero к версии
+# чувствителен, и молча разъехаться ему тут негде.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    SILERO_THREADS=8
+
+RUN pip install --index-url https://download.pytorch.org/whl/cpu \
+      torch==2.5.1 torchaudio==2.5.1 \
+ && pip install numpy omegaconf "silero-stress"
+
+WORKDIR /app
+COPY voice/ /app/voice/
+COPY service/ /app/service/
+# голос запекаем внутрь: на целевом сервере репозитория рядом не будет, и
+# монтировать нечего (в service/compose.yml код и веса приходят с хоста)
+COPY voices/stalker/model_voice.pt /opt/voice/model_voice.pt
+
+# хаб-кэш Silero нужен даже с готовыми весами: load() всегда идёт в
+# torch.hub за пакетом v5_5_ru (символы алфавита, список голосов, сам jit).
+# Заодно это проверка сборки: не хватит пакета — упадёт здесь, а не в бою.
+# silero-stress ничего не качает, модели лежат в самом пакете (65 МБ).
+RUN python -c "from voice.model import load; load()" \
+ && python -c "from voice.text import Stress; print(Stress()('Проверка сборки'))"
+
+EXPOSE 10500 10501
+CMD ["python", "-m", "service.tts", "--model", "/opt/voice/model_voice.pt"]

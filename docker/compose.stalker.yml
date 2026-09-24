@@ -1,0 +1,36 @@
+# Голос stalker на чужом сервере: один контейнер, никаких томов.
+#
+#   git clone <репозиторий> silero && cd silero
+#   docker compose -f docker/compose.stalker.yml up -d --build
+#
+# Всё внутри образа: код, веса голоса, хаб-кэш Silero (docker/Dockerfile.tts).
+# Монтировать нечего — в отличие от service/compose.yml, где код приезжает с
+# рабочей машины через scripts/deploy.sh.
+#
+# network_mode: host — чтобы Home Assistant видел wyoming без проброса портов
+# и чтобы порты менялись одной переменной, а не в двух местах.
+#
+# Один процесс, а не пять: замеры в SILERO.md («Сколько тянет один процесс»)
+# показали 200 одновременных запросов за 3.7–5.8 с на 72 ядрах, а рассылка
+# одной фразы на 200 устройств считается один раз (замок в Engine.say).
+# Копии процесса делят те же ядра и ничего не ускоряют.
+services:
+  stalker:
+    image: silero_slim
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.tts
+    container_name: silero_stalker
+    network_mode: host
+    restart: unless-stopped
+    command: >
+      python -m service.tts
+      --model /opt/voice/model_voice.pt
+      --http-port ${SILERO_HTTP_PORT:-10502}
+      --wyoming-port ${SILERO_WYOMING_PORT:-10503}
+      --workers ${SILERO_WORKERS:-16}
+    environment:
+      # потоки torch на один синтез; 8 на 72 ядрах, на машине поменьше — 4
+      SILERO_THREADS: ${SILERO_THREADS:-8}
+      TZ: ${TZ:-Europe/Moscow}
+      PYTHONDONTWRITEBYTECODE: "1"
