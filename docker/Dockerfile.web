@@ -1,0 +1,6 @@
+# silero_web: веб-морда на том же образе, что и обучение (torch, f5_tts,
+# librosa, silero-stress) плюс FastAPI. Контейнер один на всё: и раздаёт UI,
+# и генерирует сам, и запускает ступени обучения подпроцессами — поэтому
+# ему нужны GPU и host-сеть (gigaam на 127.0.0.1:10407, F5-кэш huggingface).
+FROM silero_ru
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" python-multipart

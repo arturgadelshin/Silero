@@ -1,0 +1,34 @@
+# Веб-морда: разделы обучения и генерации. Сервис silero_tts (10500/10501)
+# не трогаем — он живёт своей жизнью для Home Assistant.
+#
+#   docker compose up -d --build     (или scripts/web.sh restart)
+#
+# GPU нужен ступеням обучения (F5, ступени 1–2); синтез идёт на CPU.
+# network_mode: host — gigaam слушает 127.0.0.1:10407, HF-кэш для F5 офлайн.
+services:
+  web:
+    image: silero_web
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    container_name: silero_web
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /app
+    command: python -m web.app --port 10580
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      HF_HUB_OFFLINE: "1"
+    volumes:
+      - ${SILERO_CODE:-${HOME}/linkplay/silero}:/app
+      - ${SILERO_DATA_DIR:-${HOME}/linkplay/tmp/silero}:/w
+      - ${SILERO_DATA_DIR:-${HOME}/linkplay/tmp/silero}/hub:/root/.cache/torch/hub
+      - ${SILERO_DATA_DIR:-${HOME}/linkplay/tmp/silero}/ruaccent:/ruaccent
+      - ${HF_CACHE:-${HOME}/linkplay/tmp/hf}:/root/.cache/huggingface

@@ -1,0 +1,6 @@
+# контекст сборки silero_web (web/compose.yml поднимает его от корня репо)
+.git
+listen
+ref
+**/__pycache__
+*.pyc

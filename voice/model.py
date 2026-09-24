@@ -33,12 +33,22 @@ def encode(pk, text, voice):
     return seq, sp
 
 
-def predict(tm, seq, sp):
-    """Предсказанные длительности (кадры на символ) и нормированный pitch."""
+def predict(tm, seq, sp, durs_rate=1.0, pitch_coef=None):
+    """Предсказанные длительности (кадры на символ) и нормированный pitch.
+
+    durs_rate — темп речи, аргумент dur_predictor (как speech_rate у apply_tts).
+    pitch_coef — сдвиг тона в единицах нормированного pitch: у pitch_predictor
+    такого входа нет (там type_ids и focus_mask), поэтому сдвиг прибавляется
+    к предсказанному pitch — как δ в опыте SILERO.md «pitch»: тон в долях F0
+    равен δ = mean_std_coef · доли. Оба по умолчанию «как у модели», поэтому
+    сервис их не передаёт.
+    """
     mask = torch.zeros(1, seq.shape[1], dtype=torch.bool, device=seq.device)
-    ld = tm.dur_predictor(seq, sp, mask, 1.0, None)
+    ld = tm.dur_predictor(seq, sp, mask, durs_rate, None)
     dur = torch.round(torch.clamp(torch.exp(ld) - 1, min=0))
     pitch = tm.pitch_predictor(seq, sp, mask, None, None)
+    if pitch_coef is not None:
+        pitch = pitch + pitch_coef
     # как в forward: на пунктуации pitch обнуляется
     for i, c in enumerate(seq[0].tolist()):
         if c in tm.punkt_symbols:

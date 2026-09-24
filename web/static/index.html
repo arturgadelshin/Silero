@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silero · свой голос</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Silero · свой голос</h1>
+  <nav>
+    <button id="tabTrain" class="tab active">Обучение</button>
+    <button id="tabGen" class="tab">Генерация</button>
+  </nav>
+</header>
+
+<!-- ======================= ОБУЧЕНИЕ ======================= -->
+<section id="train" class="page">
+  <div class="card">
+    <h2>Новый голос</h2>
+
+    <label class="lbl">Имя модели (задаётся сразу)
+      <input id="modelName" maxlength="60" placeholder="например, Мой голос">
+    </label>
+
+    <h3>Опорная запись</h3>
+    <p class="hint">Одна фраза на 10–12 секунд, тихая комната, ровный темп.
+      Этой записью F5 клонирует голос, а Silero дообучается на клоне.
+      Ниже — фраза, на которой обучался рабочий голос (artur).</p>
+    <div class="row">
+      <button id="recBtn">Записать с микрофона</button>
+      <span id="recTime" class="mut"></span>
+      <label class="filebtn">или выбрать файл
+        <input id="fileInput" type="file" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a,.opus">
+      </label>
+    </div>
+    <audio id="srcAudio" controls hidden></audio>
+
+    <label class="lbl">Текст опорной фразы — что произнесено, слово в слово
+      <textarea id="refText" rows="3">В субботу утром мы с братом поехали на дачу, собирали щавель, цветы и жёлтые яблоки, а вечером пили чай на веранде.</textarea>
+    </label>
+
+    <div class="row">
+      <button id="prepareBtn" class="primary">Приготовить опору</button>
+      <span class="mut">конвертация, чистка пауз, разметка ударений, сверка с ASR</span>
+    </div>
+
+    <div id="prepInfo" hidden>
+      <div id="prepWarn" class="warn"></div>
+      <label class="lbl">Текст с ударениями — проверьте и поправьте
+        (<b>+</b> перед ударной гласной, <b>ё</b>; неверное ударение станет ошибкой клонирования)
+        <textarea id="markedText" rows="2"></textarea>
+      </label>
+      <div id="prepStats" class="mut"></div>
+      <audio id="refAudio" controls class="w100"></audio>
+    </div>
+
+    <div class="row">
+      <button id="probeBtn" class="primary">Проба (~3 мин)</button>
+      <button id="fullBtn">Полное обучение (~30 мин)</button>
+    </div>
+    <p class="hint">Проба — черновой голос на малом корпусе: послушать, туда ли клонируем.
+      Полное обучение доозвучит хвост корпуса и доведёт голос до рабочего.</p>
+  </div>
+
+  <div class="card">
+    <h2>Задачи обучения</h2>
+    <div id="jobs" class="mut">пока пусто</div>
+  </div>
+</section>
+
+<!-- ======================= ГЕНЕРАЦИЯ ======================= -->
+<section id="gen" class="page" hidden>
+  <div class="gengrid">
+
+    <div class="gcol">
+      <div class="card">
+        <h2>Синтез</h2>
+        <div class="row wrap">
+          <select id="voiceSel" class="grow"></select>
+          <button id="previewBtn" title="Послушать превью выбранной модели">превью</button>
+          <button id="renameBtn">переименовать</button>
+          <button id="delModelBtn">удалить</button>
+        </div>
+
+        <label class="lbl">Текст
+          <textarea id="genText" rows="4"
+            placeholder="Таймер на пять минут поставлен. Который час?"></textarea>
+        </label>
+        <p class="hint">
+          Цифры раскрываются словами. «|» — принудительный разрыв фразы.
+          Латиница и символы вне алфавита Silero выпадают из речи — следите за плашкой ниже.
+        </p>
+
+        <details id="settings">
+          <summary>Настройки (по умолчанию — как у модели)</summary>
+          <div class="setting">
+            <label>Скорость речи <output id="rateOut">1.00</output>×</label>
+            <input id="rate" type="range" min="0.5" max="2" step="0.05" value="1">
+          </div>
+          <div class="setting">
+            <label>Тональность <output id="pitchOut">0</output>% (выше/ниже)</label>
+            <input id="pitch" type="range" min="-40" max="40" step="5" value="0">
+          </div>
+          <div class="setting">
+            <label>Пауза на точке <output id="pauseOut">0.50</output> с</label>
+            <input id="pause" type="range" min="0" max="1.5" step="0.05" value="0.5">
+          </div>
+          <div class="setting">
+            <label>Пауза между фразами <output id="gapOut">0.25</output> с</label>
+            <input id="gap" type="range" min="0" max="2" step="0.05" value="0.25">
+          </div>
+          <div class="row wrap checks">
+            <label><input id="numbersChk" type="checkbox" checked> числа словами</label>
+            <label><input id="manualChk" type="checkbox"> свои ударения</label>
+            <label>частота
+              <select id="srSel">
+                <option value="48000" selected>48 кГц</option>
+                <option value="24000">24 кГц</option>
+                <option value="16000">16 кГц</option>
+                <option value="8000">8 кГц</option>
+              </select>
+            </label>
+            <button id="resetBtn" class="ghost">сбросить настройки</button>
+          </div>
+        </details>
+
+        <div id="manualBox" hidden>
+          <label class="lbl">Текст с ударениями (редактируется)
+            <textarea id="genMarked" rows="3"></textarea>
+          </label>
+          <div class="row">
+            <button id="markBtn">разметить автоматически</button>
+            <span class="mut">«+» перед ударной гласной, «ё» — как в опоре при обучении</span>
+          </div>
+        </div>
+
+        <div class="row">
+          <button id="genBtn" class="primary big">Сгенерировать</button>
+          <span id="genTime" class="mut"></span>
+        </div>
+        <div id="lostWarn" class="warn" hidden></div>
+        <audio id="resultAudio" controls class="w100" hidden></audio>
+        <div class="row">
+          <a id="dlLink" class="ghost" hidden>скачать файл</a>
+          <span id="markedShow" class="mut"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="gcol">
+      <div class="card">
+        <h2>История</h2>
+        <div id="history" class="mut">пока пусто</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>
