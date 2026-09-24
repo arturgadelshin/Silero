@@ -1,0 +1,17 @@
+{
+ "id": "1a0ce5153aa68be",
+ "name": "stalker",
+ "kind": "full",
+ "created": 1790167831.4670956,
+ "f0_med": 91.99970068017603,
+ "file": "train/model_voice.pt",
+ "metrics": {
+  "cer": 0.004699999999999999,
+  "cer_max": 0.0227,
+  "f0": 94
+ },
+ "finished_at": 1790236698.899807,
+ "msc": 5.18,
+ "f0_mean": 94.9,
+ "f0_std": 18.3
+}
