@@ -1,4 +1,5 @@
-# Голос stalker на чужом сервере: один контейнер, никаких томов.
+# Голоса artur и stalker на чужом сервере: один контейнер, никаких томов.
+# Оба видны в списке ассистента Home Assistant, переключение там же.
 #
 #   git clone <репозиторий> silero && cd silero
 #   docker compose -f docker/compose.stalker.yml up -d --build
@@ -25,6 +26,7 @@ services:
     restart: unless-stopped
     command: >
       python -m service.tts
+      --model /opt/voices/artur/model_voice.pt
       --model /opt/voices/stalker/model_voice.pt
       --http-port ${SILERO_HTTP_PORT:-10502}
       --wyoming-port ${SILERO_WYOMING_PORT:-10503}

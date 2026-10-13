@@ -13,7 +13,15 @@ services:
     network_mode: host
     restart: unless-stopped
     working_dir: /app
-    command: python -m service.tts --voice-label artur
+    # Два голоса в одном процессе: в Home Assistant это один TTS, а artur и
+    # stalker — голоса в его списке. Путь /w/train служебный, подпись оттуда
+    # не вывести, поэтому она задана явно; у stalker её даёт каталог.
+    # Веса stalker лежат в данных, а не в образе: это копия
+    # voices/stalker/model_voice.pt из репозитория.
+    command: >
+      python -m service.tts
+      --model artur=/w/train/model_voice.pt
+      --model /w/voices/stalker/model_voice.pt
     environment:
       # контейнер работает от root: без этого он сорит __pycache__ в /app,
       # и deploy потом не может их удалить

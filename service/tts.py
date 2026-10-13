@@ -6,6 +6,13 @@
 секунде, третий уже 24 мс). Дальше на запрос остаётся разметка (6 мс) и
 синтез (RTF 0.05), то есть фраза на три секунды готова примерно за 0.15 с.
 
+Голосов может быть несколько: `--model` повторяется, и каждая модель получает
+свою подпись (`--model voices/artur/model_voice.pt --model voices/stalker/…`
+или `подпись=путь`). В Home Assistant они приходят одной сущностью TTS, но
+разными голосами в списке — переключение прямо в ассистенте. Стоковые голоса
+берутся из первой модели; они в ней уже не стоковые, общие слои ступени 2
+учатся для всех строк сразу (см. SILERO.md).
+
 Два входа в один и тот же движок:
   HTTP      POST /say (тело — текст или JSON) и GET /say?text=… -> WAV;
             GET /health, GET /voices
@@ -31,7 +38,7 @@ import re
 import socketserver
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -50,6 +57,30 @@ VERSION = "1.0"
 
 SERVICE = [".", "..", "/", "w", "opt", "tmp", "home", "app", "voice", "voices",
            "models", "model", "train", "silero"]
+
+
+Pick = namedtuple("Pick", "name label speaker tm")
+"""выбранный голос: имя, под которым его просят; подпись обученной модели,
+к которой он относится; строка внутри этой модели; сама модель"""
+
+
+def model_args(items, speaker="xenia"):
+    """`--model` принимается несколько раз: `путь` или `подпись=путь`.
+
+    Без подписи её даёт имя каталога весов (`voices/artur` -> «artur»), как и
+    было с одним голосом. Подписи обязаны быть разными: именно они попадают в
+    Home Assistant как имена голосов.
+    """
+    out = []
+    for it in items:
+        label, sep, path = it.partition("=")
+        if not sep or len(label) == 1:                  # «C:\...» — это не подпись
+            label, path = "", it
+        label = label or voice_label(path, speaker)
+        if label in [l for l, _ in out]:
+            raise SystemExit(f"две модели с одной подписью: {label}")
+        out.append((label, path))
+    return out
 
 
 def voice_label(path, speaker):
@@ -85,7 +116,17 @@ class Engine:
         t0 = time.time()
         _, self.pk, self.tm = load()
         torch.set_grad_enabled(False)
-        self.tm = load_state(self.tm, a.model, a.row, "cpu")
+        hub = self.tm
+        self.models = OrderedDict()
+        for label, path in a.models:
+            tm = load_state(hub, path, a.row, "cpu")
+            if tm is hub and len(a.models) > 1:
+                raise SystemExit(f"{path}: это строка голоса [2,128], она ложится "
+                                 "в общую модель. Несколькими голосами работают "
+                                 "только целые модели ступени 2 (jit)")
+            self.models[label] = tm
+        self.tm = next(iter(self.models.values()))      # голос по умолчанию
+        self.voices = self.voice_map(self.models, self.pk.speakers, a.speaker)
         self.alphabet = set(self.pk.symbols[3:])
         t_model = time.time() - t0
 
@@ -111,17 +152,44 @@ class Engine:
         # разметку греем тем же вызовом: первый вызов разметчика дороже
         # остальных (модель омографов), и это тоже секунда на первом запросе
         def warm():
-            for k in range(3):
-                self.say(f"Прогрев голоса, замок и замок, попытка {k + 1}.",
-                         a.speaker, sr=self.SR)
+            # греем каждую модель: оптимизация jit своя у каждой, иначе первый
+            # запрос вторым голосом платит секунду
+            for label in self.models:
+                for k in range(3):
+                    self.say(f"Прогрев голоса {label}, замок и замок, "
+                             f"попытка {k + 1}.", label, sr=self.SR)
         w = threading.Thread(target=warm)
         w.start()
         w.join()
         self.stat.update(requests=0, speech_sec=0.0, synth_sec=0.0, cache_hits=0)
-        print(f"готов: модель {t_model:.1f} с, {a.accent_engine} {t_acc:.1f} с, "
-              f"прогрев {time.time() - t0:.1f} с; голос {getattr(a, 'voice_label', a.speaker)} "
-              f"(строка {a.speaker}), "
+        print(f"готов: модели {t_model:.1f} с, {a.accent_engine} {t_acc:.1f} с, "
+              f"прогрев {time.time() - t0:.1f} с; "
+              f"голос{'а' if len(self.models) > 1 else ''} "
+              f"{', '.join(self.models)} (строка {a.speaker}), "
               f"одновременно {a.workers}", flush=True)
+
+    @staticmethod
+    def voice_map(models, speakers, own_row):
+        """Имя голоса -> что синтезировать.
+
+        Обученные голоса зовутся своими подписями (artur, stalker), стоковые —
+        строками модели. Имя строки обученного голоса (xenia) оставлено
+        рабочим: его мог запомнить настроенный Home Assistant. Стоковые берутся
+        из модели голоса по умолчанию — они в ней всё равно уже не стоковые,
+        общие слои на ступени 2 учатся для всех строк сразу.
+        """
+        v = OrderedDict()
+        for label, tm in models.items():
+            v[label] = Pick(label, label, own_row, tm)
+        first = next(iter(v.values()))
+        v.setdefault(own_row, first)
+        for s in speakers:
+            if s != own_row:
+                v.setdefault(s, Pick(s, first.label, s, first.tm))
+        return v
+
+    def pick(self, name=None):
+        return self.voices.get(name) or next(iter(self.voices.values()))
 
     # ---------------------------------------------------------------- текст
     def mark(self, s, accent=True, numbers=True):
@@ -129,17 +197,17 @@ class Engine:
         return s, outside(s, self.alphabet)
 
     # ---------------------------------------------------------------- звук
-    def _one(self, text, speaker, pause):
+    def _one(self, text, v, pause):
         # режим grad в torch потоко-локальный, а запросы приходят в новых
         # потоках: без no_grad здесь тензоры требуют градиент и numpy() падает
         with torch.no_grad():
-            seq, sp = encode(self.pk, text, speaker)
-            mask, dur, pitch = predict(self.tm, seq, sp)
-            dur = cap_pauses(self.tm, seq, dur, pause)
-            _, wav = synth(self.tm, seq, sp, mask, dur, pitch)
+            seq, sp = encode(self.pk, text, v.speaker)
+            mask, dur, pitch = predict(v.tm, seq, sp)
+            dur = cap_pauses(v.tm, seq, dur, pause)
+            _, wav = synth(v.tm, seq, sp, mask, dur, pitch)
             return wav.numpy()
 
-    def _render(self, text, speaker, accent, numbers, sr, gap, pause):
+    def _render(self, text, v, accent, numbers, sr, gap, pause):
         t0 = time.time()
         parts, marks, lost = [], [], []
         for i, s in enumerate(split_text(text)):
@@ -147,7 +215,7 @@ class Engine:
             marks.append(m)
             lost += bad
             with self.sem:
-                w = self._one(m, speaker, pause)
+                w = self._one(m, v, pause)
             if i:
                 parts.append(np.zeros(int(gap * self.SR), dtype=np.float32))
             parts.append(w)
@@ -171,10 +239,12 @@ class Engine:
         (wyoming), остальные синтезировали заново. Теперь первый считает,
         прочие ждут его на Job и забирают тот же самый ответ.
         """
-        speaker = speaker or self.a.speaker
+        v = self.pick(speaker)
         sr = sr or self.a.sr
         pause = self.a.pause_max if pause is None else pause
-        key = (text, speaker, accent, numbers, sr, pause)
+        # ключ по подписи модели и строке в ней, а не по запрошенному имени:
+        # «xenia» и «artur» — один и тот же синтез, кэш у них общий
+        key = (text, v.label, v.speaker, accent, numbers, sr, pause)
         with self.lock:
             hit = self.cache.get(key)
             if hit is not None:
@@ -195,7 +265,7 @@ class Engine:
                 self.stat["requests"] += 1
             return job.res
         try:
-            res = self._render(text, speaker, accent, numbers, sr, gap, pause)
+            res = self._render(text, v, accent, numbers, sr, gap, pause)
         except BaseException as exc:                   # noqa: BLE001
             job.err = exc
             with self.lock:
@@ -284,13 +354,16 @@ class Handler(BaseHTTPRequestHandler):
             s["uptime_sec"] = round(time.time() - s.pop("started"), 1)
             s["rtf"] = round(s["synth_sec"] / max(s["speech_sec"], 1e-9), 3)
             s["speaker"] = self.eng.a.speaker
-            s["voice"] = self.eng.a.voice_label
+            s["voice"] = next(iter(self.eng.models))
+            s["voices"] = list(self.eng.models)
             s["cache_mb"] = round(self.eng.cache_bytes / 1e6, 1)
             return self._json(s)
         if u.path == "/voices":
-            return self._json({"speakers": list(self.eng.pk.speakers),
-                               "own": self.eng.a.speaker,
-                               "voice": self.eng.a.voice_label,
+            return self._json({"names": list(self.eng.voices),
+                               "own": list(self.eng.models),
+                               "speakers": list(self.eng.pk.speakers),
+                               "voice": next(iter(self.eng.models)),
+                               "row": self.eng.a.speaker,
                                "sr": self.eng.a.sr})
         if u.path == "/say":
             return self._say((q.get("text") or [""])[0], q)
@@ -331,25 +404,36 @@ class Wyoming(socketserver.StreamRequestHandler):
         self.wfile.flush()
 
     def info(self):
-        """Свой голос и четыре стоковых Silero.
+        """Обученные голоса и четыре стоковых Silero.
 
-        Имя голоса — строка модели (xenia и прочие), его HA возвращает в
-        synthesize; менять его нельзя, иначе у уже настроенного HA отвалится
-        выбранный голос. Различают их описания: свой подписан именем из
-        --voice-label, стоковые — прямо так и подписаны.
+        С одним голосом список как был: имя — строка модели (xenia), подпись
+        из --voice-label в описании. Менять это нельзя — имя HA возвращает в
+        synthesize, и у настроенного HA выбранный голос отвалился бы.
+
+        С несколькими моделями строкой голоса их не различить (во всех обучена
+        одна и та же, xenia), поэтому именами становятся подписи: artur,
+        stalker. В списке ассистента они и видны, переключение — там же. Имя
+        xenia по-прежнему принимается, просто больше не показывается.
         """
         att = {"name": "silero + f5 clone", "url": "https://github.com/snakers4/silero-models"}
-        own = self.eng.a.speaker
-        names = [own] + [s for s in self.eng.pk.speakers if s != own]
-        voices = [{"name": s,
-                   "description": self.eng.a.voice_label if s == own
-                   else f"{s}, стоковый Silero",
+        own = list(self.eng.models)
+        row = self.eng.a.speaker
+        if len(own) > 1:
+            mine = [(label, label) for label in own]
+        else:
+            mine = [(row, own[0])]
+        stock = [(s, f"{s}, стоковый Silero")
+                 for s in self.eng.pk.speakers if s != row]
+        voices = [{"name": name, "description": desc,
                    "attribution": att, "installed": True, "version": VERSION,
-                   "languages": ["ru"], "speakers": None} for s in names]
+                   "languages": ["ru"], "speakers": None}
+                  for name, desc in mine + stock]
         return {"asr": [], "wake": [], "handle": [], "intent": [], "mic": [], "snd": [],
                 "satellite": None,
                 "tts": [{"name": "silero-own",
-                         "description": f"Silero v5_5_ru, голос {self.eng.a.voice_label}",
+                         "description": "Silero v5_5_ru, голос"
+                                        f"{'а' if len(own) > 1 else ''} "
+                                        f"{', '.join(own)}",
                          "attribution": att, "installed": True, "version": VERSION,
                          "voices": voices, "supports_synthesize_streaming": False}]}
 
@@ -377,9 +461,7 @@ class Wyoming(socketserver.StreamRequestHandler):
 
     def synthesize(self, data):
         text = (data.get("text") or "").strip()
-        voice = (data.get("voice") or {}).get("name") or self.eng.a.speaker
-        if voice not in self.eng.pk.speakers:
-            voice = self.eng.a.speaker
+        voice = (data.get("voice") or {}).get("name")
         sr = self.eng.a.wyoming_sr
         t0 = time.time()
         r = self.eng.say(text, speaker=voice, sr=sr)
@@ -401,10 +483,13 @@ class TCP(socketserver.ThreadingTCPServer):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=data("train/model_voice.pt"))
+    ap.add_argument("--model", action="append", default=[], metavar="[ПОДПИСЬ=]ПУТЬ",
+                    help="веса голоса; можно несколько раз — тогда голоса "
+                         "переключаются в самом ассистенте")
     ap.add_argument("--speaker", default="xenia", help="строка обученного голоса")
-    ap.add_argument("--voice-label", default="", help="подпись голоса в HA; по "
-                    "умолчанию имя каталога весов (voices/stalker -> stalker)")
+    ap.add_argument("--voice-label", default="", help="подпись единственного "
+                    "голоса в HA; по умолчанию имя каталога весов "
+                    "(voices/stalker -> stalker)")
     ap.add_argument("--row", type=int, default=4)
     ap.add_argument("--sr", type=int, default=48000, help="частота ответа HTTP")
     ap.add_argument("--wyoming-sr", type=int, default=22050)
@@ -421,7 +506,11 @@ def main():
     ap.add_argument("--accent-model", default="turbo3.1", help="модель омографов RUAccent")
     ap.add_argument("--no-accent", action="store_true", help="без RUAccent (старт за 2 с)")
     a = ap.parse_args()
-    a.voice_label = a.voice_label or voice_label(a.model, a.speaker)
+    a.model = a.model or [data("train/model_voice.pt")]
+    a.models = model_args(a.model, speaker=a.speaker)
+    if len(a.models) == 1 and a.voice_label:            # --voice-label как раньше
+        a.models = [(a.voice_label, a.models[0][1])]
+    a.voice_label = a.models[0][0]
 
     eng = Engine(a)
     Handler.eng = eng

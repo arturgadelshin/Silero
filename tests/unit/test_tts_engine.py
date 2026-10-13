@@ -11,14 +11,18 @@ import types
 
 import pytest
 
-from service.tts import Engine
+from service.tts import Engine, Pick
 
 
-def engine(cache_mb=200.0):
+def engine(cache_mb=200.0, voices=("artur",)):
     e = Engine.__new__(Engine)
     e.SR = 48000
     e.a = types.SimpleNamespace(speaker="xenia", sr=48000, pause_max=0.5,
                                 cache_mb=cache_mb)
+    e.models = __import__("collections").OrderedDict(
+        (v, f"модель {v}") for v in voices)
+    e.voices = Engine.voice_map(e.models, ["aidar", "baya", "kseniya",
+                                           "eugene", "xenia"], "xenia")
     e.lock = threading.Lock()
     e.cache = __import__("collections").OrderedDict()
     e.cache_bytes = 0
@@ -30,8 +34,8 @@ def engine(cache_mb=200.0):
 
 
 def slow_render(e, delay=0.2, pcm=b"\0" * 100):
-    def _render(text, speaker, accent, numbers, sr, gap, pause):
-        e.calls.append(text)
+    def _render(text, v, accent, numbers, sr, gap, pause):
+        e.calls.append((text, v.label, v.speaker))
         time.sleep(delay)
         return {"pcm": pcm, "sr": sr, "sec": 1.0, "text": text, "lost": [],
                 "synth_sec": delay}
@@ -59,6 +63,7 @@ def test_one_synthesis_for_a_broadcast():
     out, err = storm(e, 50)
     assert err == []
     assert len(e.calls) == 1                            # до замка было бы под сорок
+    assert e.calls[0] == ("одна фраза на всех", "artur", "xenia")
     assert len(out) == 50 and all(r is out[0] for r in out)
     assert e.stat["requests"] == 50 and e.stat["cache_hits"] == 49
     assert e.stat["speech_sec"] == 1.0                  # речь считаем один раз
@@ -93,7 +98,7 @@ def test_waiters_get_the_answer_even_if_the_cache_evicted_it():
 def test_failure_does_not_start_a_stampede():
     e = engine()
     def _render(*args):
-        e.calls.append(args[0])
+        e.calls.append(args[0])                         # текст
         time.sleep(0.1)
         raise ValueError("битый текст")
     e._render = _render
@@ -125,6 +130,7 @@ def test_wyoming_info_lists_all_voices_with_own_first():
     from service.tts import Wyoming
     eng = types.SimpleNamespace(
         a=types.SimpleNamespace(speaker="xenia", voice_label="stalker"),
+        models={"stalker": "м1"},
         pk=types.SimpleNamespace(speakers=["aidar", "baya", "kseniya",
                                            "eugene", "xenia"]))
     info = Wyoming.info(types.SimpleNamespace(eng=eng))
@@ -134,3 +140,63 @@ def test_wyoming_info_lists_all_voices_with_own_first():
     assert voices[0]["description"] == "stalker"     # свой — первым и по имени
     assert all("стоковый" in v["description"] for v in voices[1:])
     assert "stalker" in info["tts"][0]["description"]
+
+
+def test_wyoming_info_with_two_voices_lists_labels():
+    from service.tts import Wyoming
+    import collections
+    models = collections.OrderedDict(artur="м1", stalker="м2")
+    eng = types.SimpleNamespace(
+        a=types.SimpleNamespace(speaker="xenia", voice_label="artur"),
+        models=models,
+        pk=types.SimpleNamespace(speakers=["aidar", "baya", "kseniya",
+                                           "eugene", "xenia"]))
+    info = Wyoming.info(types.SimpleNamespace(eng=eng))
+    voices = info["tts"][0]["voices"]
+    # обученные зовутся подписями: строкой xenia их не различить, она в обеих
+    assert [v["name"] for v in voices] == ["artur", "stalker", "aidar", "baya",
+                                           "kseniya", "eugene"]
+    assert [v["description"] for v in voices[:2]] == ["artur", "stalker"]
+    assert "artur, stalker" in info["tts"][0]["description"]
+
+
+def test_voice_map_resolves_labels_rows_and_unknown_names():
+    rows = ["aidar", "baya", "kseniya", "eugene", "xenia"]
+    import collections
+    v = Engine.voice_map(collections.OrderedDict(artur="м1", stalker="м2"),
+                         rows, "xenia")
+    assert v["artur"] == Pick("artur", "artur", "xenia", "м1")
+    assert v["stalker"] == Pick("stalker", "stalker", "xenia", "м2")
+    # имя строки обученного голоса оставлено рабочим: его помнит настроенный HA
+    assert v["xenia"] == v["artur"]
+    # стоковые — из модели по умолчанию
+    assert v["eugene"] == Pick("eugene", "artur", "eugene", "м1")
+    e = engine(voices=("artur", "stalker"))
+    assert e.pick("stalker").tm == "модель stalker"
+    assert e.pick("нет такого") == e.pick("artur")      # незнакомое имя — первый
+    assert e.pick(None) == e.pick("artur")
+
+
+def test_two_names_of_one_voice_share_the_cache():
+    e = engine(voices=("artur", "stalker"))
+    slow_render(e)
+    assert e.say("одна фраза", "xenia") is e.say("одна фраза", "artur")
+    assert len(e.calls) == 1
+    # а другой голос считается заново
+    e.say("одна фраза", "stalker")
+    assert [c[1] for c in e.calls] == ["artur", "stalker"]
+
+
+def test_model_args_takes_paths_and_labels():
+    from service.tts import model_args
+    assert model_args(["voices/artur/model_voice.pt"]) == [
+        ("artur", "voices/artur/model_voice.pt")]
+    assert model_args(["/opt/voices/stalker/model_voice.pt",
+                       "свой=/w/train/model_voice.pt"]) == [
+        ("stalker", "/opt/voices/stalker/model_voice.pt"),
+        ("свой", "/w/train/model_voice.pt")]
+    # служебный путь без подписи: остаётся строка модели
+    assert model_args(["/w/train/model_voice.pt"]) == [
+        ("xenia", "/w/train/model_voice.pt")]
+    with pytest.raises(SystemExit):
+        model_args(["voices/artur/model_voice.pt", "artur=/w/train/model_voice.pt"])

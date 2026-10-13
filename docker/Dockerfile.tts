@@ -30,10 +30,12 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu \
 WORKDIR /app
 COPY voice/ /app/voice/
 COPY service/ /app/service/
-# голос запекаем внутрь: на целевом сервере репозитория рядом не будет, и
+# голоса запекаем внутрь: на целевом сервере репозитория рядом не будет, и
 # монтировать нечего (в service/compose.yml код и веса приходят с хоста).
-# Имя каталога не случайно: из него сервис берёт подпись голоса для Home
-# Assistant, иначе в списке HA два инстанса не различить
+# Имена каталогов не случайны: из них сервис берёт подписи голосов для Home
+# Assistant. Их два, и оба в списке ассистента — переключение там же.
+# Каждый файл это 92 МБ образа и +0.2 ГБ RAM у процесса.
+COPY voices/artur/model_voice.pt /opt/voices/artur/model_voice.pt
 COPY voices/stalker/model_voice.pt /opt/voices/stalker/model_voice.pt
 
 # хаб-кэш Silero нужен даже с готовыми весами: load() всегда идёт в
@@ -44,4 +46,6 @@ RUN python -c "from voice.model import load; load()" \
  && python -c "from voice.text import Stress; print(Stress()('Проверка сборки'))"
 
 EXPOSE 10500 10501
-CMD ["python", "-m", "service.tts", "--model", "/opt/voices/stalker/model_voice.pt"]
+CMD ["python", "-m", "service.tts", \
+     "--model", "/opt/voices/artur/model_voice.pt", \
+     "--model", "/opt/voices/stalker/model_voice.pt"]
