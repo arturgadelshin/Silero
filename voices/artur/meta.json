@@ -1,0 +1,16 @@
+{
+ "id": "1a0c8bf347cbfc6",
+ "name": "artur",
+ "kind": "full",
+ "created": 1790074369.148128,
+ "f0_med": 105,
+ "file": "train/model_voice.pt",
+ "metrics": {
+  "cer": 0.0062,
+  "cer_max": 0.0381,
+  "f0": 105
+ },
+ "msc": 6.48,
+ "f0_mean": 108.7,
+ "f0_std": 16.8
+}
