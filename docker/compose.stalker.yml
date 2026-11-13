@@ -31,6 +31,7 @@ services:
       --http-port ${SILERO_HTTP_PORT:-10502}
       --wyoming-port ${SILERO_WYOMING_PORT:-10503}
       --workers ${SILERO_WORKERS:-16}
+      --loudness ${SILERO_LOUDNESS:--15.8}
     environment:
       # потоки torch на один синтез; 8 на 72 ядрах, на машине поменьше — 4
       SILERO_THREADS: ${SILERO_THREADS:-8}
