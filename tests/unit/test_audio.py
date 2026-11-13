@@ -7,7 +7,8 @@ import wave
 import numpy as np
 import pytest
 
-from voice.audio import pcm_bytes, speech_span, wav_bytes, wav_from_pcm, write16
+from voice.audio import (loudness_normalize, lufs, pcm_bytes, speech_span,
+                         wav_bytes, wav_from_pcm, write16)
 
 
 def read(b):
@@ -62,3 +63,53 @@ def test_speech_span_on_silence():
 
 def test_speech_span_on_too_short():
     assert speech_span(np.zeros(10, dtype=np.float32), 16000) is None
+
+
+# --- громкость (ITU-R BS.1770) ---------------------------------------------
+
+def tone(freq=1000.0, amp=0.5, sec=2.0, sr=48000):
+    t = np.arange(int(sec * sr)) / sr
+    return (amp * np.sin(2 * np.pi * freq * t)).astype(np.float32)
+
+
+def test_lufs_reference_tone():
+    # 1 кГц на половину шкалы: -0.691 + 20*log10(0.5/sqrt(2)) = -9.72, плюс
+    # +0.66 дБ подъём полки K-взвешивания на 1 кГц -> -9.06 LUFS. Калибровка
+    # ITU (-20 dBFS 997 Гц -> -23.0 LUFS) соблюдается тем же расчётом.
+    assert abs(lufs(tone()) - (-9.06)) < 0.1
+
+
+def test_lufs_tracks_gain():
+    a, b = tone(amp=0.2), tone(amp=0.4)             # +6 дБ амплитуды
+    assert abs((lufs(b) - lufs(a)) - 6.02) < 0.1
+
+
+def test_lufs_ignores_quiet_tail():
+    # гейт выкидывает блоки чистой тишины, но граничные блоки «тон+тишина»
+    # по правилам BS.1770 остаются — они и дают эти ~0.5 дБ (ffmpeg ebur128
+    # на том же сигнале считает столько же)
+    x = np.concatenate([tone(sec=1.5), np.zeros(48000, dtype=np.float32)])
+    assert abs(lufs(x) - lufs(tone(sec=1.5))) < 0.6
+
+
+def test_lufs_silence_is_minus_inf():
+    assert lufs(np.zeros(48000, dtype=np.float32)) == float("-inf")
+
+
+def test_normalize_hits_target_without_clip():
+    x = tone(amp=0.1)
+    y = loudness_normalize(x, target=-13.0)
+    assert abs(lufs(y) - (-13.0)) < 0.2
+    assert np.abs(y).max() <= 10 ** (-1.1 / 20) + 1e-6
+
+
+def test_normalize_limits_loud_peaks():
+    x = tone(amp=0.9)                                # выше цели без лимитера
+    y = loudness_normalize(x, target=-13.0)
+    assert np.abs(y).max() <= 10 ** (-1.1 / 20) + 1e-6
+    assert abs(lufs(y) - (-13.0)) < 0.3
+
+
+def test_normalize_keeps_silence_silent():
+    x = np.zeros(4800, dtype=np.float32)
+    assert np.abs(loudness_normalize(x)).max() == 0.0

@@ -45,7 +45,7 @@ from urllib.parse import urlparse, parse_qs
 import numpy as np
 import torch
 
-from voice.audio import pcm_bytes, resample, wav_from_pcm
+from voice.audio import loudness_normalize, pcm_bytes, resample, wav_from_pcm
 from voice.model import (SR, cap_pauses, encode, load, load_state, predict,
                          synth)
 from voice.paths import data
@@ -220,6 +220,10 @@ class Engine:
                 parts.append(np.zeros(int(gap * self.SR), dtype=np.float32))
             parts.append(w)
         x = np.concatenate(parts)
+        if self.a.loudness is not None:
+            # до ресемпла: K-взвешивание посчитано под 48 кГц, а ресемпл
+            # после ограничителя уводит пик не дальше его запаса в 0.5 дБ
+            x = loudness_normalize(x, self.SR, self.a.loudness, self.a.peak_dbfs)
         if sr != self.SR:
             x = resample(x, self.SR, sr)
         return {"pcm": pcm_bytes(x), "sr": sr, "sec": len(x) / sr,
@@ -357,6 +361,7 @@ class Handler(BaseHTTPRequestHandler):
             s["voice"] = next(iter(self.eng.models))
             s["voices"] = list(self.eng.models)
             s["cache_mb"] = round(self.eng.cache_bytes / 1e6, 1)
+            s["loudness"] = self.eng.a.loudness
             return self._json(s)
         if u.path == "/voices":
             return self._json({"names": list(self.eng.voices),
@@ -500,6 +505,13 @@ def main():
     ap.add_argument("--cache-mb", type=float, default=200.0)
     ap.add_argument("--pause-max", type=float, default=0.5,
                     help="потолок паузы на точке внутри фразы, с (0 — как у модели)")
+    ap.add_argument("--loudness", type=float, default=None, metavar="LUFS",
+                    help="нормировать каждый ответ до этой громкости "
+                    "(BS.1770, моно; у живых записей диктора −15.7…−16.0 на "
+                    "канал — берите -15.8); без ключа звук уходит как "
+                    "синтезировался")
+    ap.add_argument("--peak-dbfs", type=float, default=-1.1,
+                    help="потолок пиков при --loudness (у эталона −1.1)")
     ap.add_argument("--ruaccent-dir", default="/ruaccent")
     ap.add_argument("--accent-engine", default="silero", choices=["silero", "ruaccent"],
                     help="разметчик ударений: silero-stress или RUAccent")

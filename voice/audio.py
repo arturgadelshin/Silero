@@ -1,9 +1,10 @@
-"""audio.py — звук: запись WAV, спектр, F0, выравнивание.
+"""audio.py — звук: запись WAV, спектр, F0, выравнивание, громкость.
 
 Тяжёлые librosa и torchaudio импортируются внутри функций: сервису они нужны
 только на ресемпле, а обучению и вскрытию — постоянно.
 """
 import io
+import math
 import wave
 
 import numpy as np
@@ -125,3 +126,92 @@ def resample(x, src, dst):
     import torchaudio
     with torch.no_grad():
         return torchaudio.functional.resample(torch.as_tensor(x), src, dst).numpy()
+
+
+# ---------------------------------------------------------------- громкость
+# ITU-R BS.1770-4: K-взвешивание (полка ВЧ + ФВЧ RLB), блоки 400 мс с шагом
+# 100 мс, абсолютный гейт −70 LUFS и относительный −10 LU. Канонические
+# коэффициенты посчитаны для 48 кГц; для других частот — по формулам DeMan
+# (De Man, «Evaluation of implementations of the ITU-R BS.1770 algorithm»).
+_K48 = ((1.53512485958697, -2.69169618940638, 1.19839281085285),
+        (1.0, -1.69065929318241, 0.73248077421585),
+        (1.0, -2.0, 1.0),
+        (1.0, -1.99004745483398, 0.99007225036621))
+
+
+def _k_filters(sr):
+    """Два биквадрата K-взвешивания: b1, a1 (полка), b2, a2 (ФВЧ)."""
+    if sr == 48000:
+        return _K48
+    f1, g, q1 = 1681.9744509555331, 3.999843853973347, 0.7071752369554199
+    f2, q2 = 38.13547087602444, 0.5003270373238773
+    k1 = math.tan(math.pi * f1 / sr)
+    vh = 10.0 ** (g / 20.0)
+    vb = vh ** 0.4996667741545416
+    a0 = 1.0 + k1 / q1 + k1 * k1
+    b1 = ((vh + vb * k1 / q1 + k1 * k1) / a0,
+          2.0 * (k1 * k1 - vh) / a0,
+          (vh - vb * k1 / q1 + k1 * k1) / a0)
+    a1 = (1.0, 2.0 * (k1 * k1 - 1.0) / a0, (1.0 - k1 / q1 + k1 * k1) / a0)
+    k2 = math.tan(math.pi * f2 / sr)
+    a0 = 1.0 + k2 / q2 + k2 * k2
+    b2 = (1.0 / a0, -2.0 / a0, 1.0 / a0)
+    a2 = (1.0, 2.0 * (k2 * k2 - 1.0) / a0, (1.0 - k2 / q2 + k2 * k2) / a0)
+    return b1, a1, b2, a2
+
+
+def lufs(x, sr=SR):
+    """Интегральная громкость по ITU-R BS.1770-4, LUFS. Тишина -> -inf."""
+    import torchaudio
+    t = torch.as_tensor(np.asarray(x, dtype=np.float32))
+    b1, a1, b2, a2 = _k_filters(sr)
+    with torch.no_grad():
+        for b, a in ((b1, a1), (b2, a2)):
+            t = torchaudio.functional.lfilter(t, torch.as_tensor(a, dtype=t.dtype),
+                                              torch.as_tensor(b, dtype=t.dtype),
+                                              clamp=False)
+    y = t.numpy()
+    bl, hp = int(0.400 * sr), int(0.100 * sr)
+    if len(y) == 0:
+        return float("-inf")
+    if len(y) < bl:                                  # фраза короче блока
+        ms = np.array([float((y * y).mean())])
+    else:
+        n = 1 + (len(y) - bl) // hp
+        w = np.lib.stride_tricks.sliding_window_view(y[:(n - 1) * hp + bl], bl)[::hp][:n]
+        ms = (w * w).mean(axis=1)
+    lj = -0.691 + 10.0 * np.log10(np.maximum(ms, 1e-20))
+    keep = lj > -70.0
+    if not keep.any():
+        return float("-inf")
+    rel = -0.691 + 10.0 * math.log10(ms[keep].mean()) - 10.0
+    keep &= lj > rel
+    return float(-0.691 + 10.0 * math.log10(ms[keep].mean()))
+
+
+def loudness_normalize(x, sr=SR, target=-13.0, peak_db=-1.1, knee=0.85):
+    """Подгонка фразы под громкость target LUFS с потолком пиков peak_db.
+
+    Усиление одно на всю фразу (динамика внутри фразы не трогается), пики
+    выше колена мягко прижимаются tanh-ограничителем: жёсткого клиппа нет
+    никогда, а колено 0.85 от потолка не даёт окраски на обычной речи.
+    Эталон — живые записи диктора («Даниил начитка»): стерео дубль-моно,
+    −15.7/−16.0 LUFS на канал (−12.7/−12.9 в сумме каналов, что и показывает
+    ebur128 по стерео), true peak −1.1 dBFS. Обе подогнаны к пику, поэтому и
+    здесь нормировка фраза-за-фразой, а не разовый множитель. Цель для моно
+    синтеза — уровень ОДНОГО канала: на одной и той же железке моно-файл
+    звучит ровно как канал стерео-файла, а не как сумма каналов.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    cur = lufs(x, sr)
+    if not math.isfinite(cur):
+        return x
+    y = x * float(10.0 ** ((target - cur) / 20.0))
+    c = 10.0 ** (peak_db / 20.0)
+    t = knee * c
+    a = np.abs(y)
+    over = a > t
+    if over.any():
+        y = y.copy()
+        y[over] = np.sign(y[over]) * (t + (c - t) * np.tanh((a[over] - t) / (c - t)))
+    return y
