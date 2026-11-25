@@ -18,7 +18,7 @@ def engine(cache_mb=200.0, voices=("artur",)):
     e = Engine.__new__(Engine)
     e.SR = 48000
     e.a = types.SimpleNamespace(speaker="xenia", sr=48000, pause_max=0.5,
-                                cache_mb=cache_mb)
+                                cache_mb=cache_mb, loudness=None, peak_dbfs=-1.1)
     e.models = __import__("collections").OrderedDict(
         (v, f"модель {v}") for v in voices)
     e.voices = Engine.voice_map(e.models, ["aidar", "baya", "kseniya",
@@ -34,7 +34,7 @@ def engine(cache_mb=200.0, voices=("artur",)):
 
 
 def slow_render(e, delay=0.2, pcm=b"\0" * 100):
-    def _render(text, v, accent, numbers, sr, gap, pause):
+    def _render(text, v, accent, numbers, sr, gap, pause, out=None):
         e.calls.append((text, v.label, v.speaker))
         time.sleep(delay)
         return {"pcm": pcm, "sr": sr, "sec": 1.0, "text": text, "lost": [],
@@ -185,6 +185,74 @@ def test_two_names_of_one_voice_share_the_cache():
     # а другой голос считается заново
     e.say("одна фраза", "stalker")
     assert [c[1] for c in e.calls] == ["artur", "stalker"]
+
+
+def test_pieces_leave_as_soon_as_they_are_ready():
+    # движок без модели: вместо синтеза — 0.1 с тишины на кусок текста
+    import numpy as np
+    # предложения длиннее 40 знаков: короче split_text клеит к соседу
+    text = "На кухне двадцать два градуса, свет включён. " \
+           "За окном дождь, завтра ожидается солнечно. " \
+           "Таймер на десять минут поставлен и уже идёт."
+    e = engine()
+    done = []
+    e.sem = threading.Lock()
+    e.mark = lambda s, accent, numbers: (s, [])
+
+    def one(m, v, pause):
+        done.append(m)
+        return np.zeros(4800, dtype=np.float32)
+    e._one = one
+    got = []                                            # (сколько кусков готово, байты)
+    r = e.say(text, out=lambda b: got.append((len(done), b)))
+    # каждый кусок уходит, как только готов он сам, а не вся фраза
+    assert [n for n, _ in got] == [1, 2, 3]
+    # пауза 0.25 с после каждого, кроме последнего: (0.1 + 0.25) с и 0.1 с
+    assert [len(b) for _, b in got] == [33600, 33600, 9600]
+    assert b"".join(b for _, b in got) == r["pcm"]
+    assert r["sec"] == pytest.approx(0.1 * 3 + 0.25 * 2)
+    assert r["text"] == text
+    assert r["first_sec"] is not None
+    # одно предложение — нечего отправлять раньше времени
+    assert e.say("Только одна фраза.")["first_sec"] is None
+
+
+def test_wyoming_sends_pieces_as_they_come():
+    from service.tts import Wyoming
+    pieces = [b"\1" * 44100, b"\2" * 22050, b"\3" * 4410]     # 1 с, 0.5 с, 0.1 с
+    ev = []
+
+    def say(text, speaker, sr, out):
+        for p in pieces:
+            out(p)
+        return {"pcm": b"".join(pieces), "sec": 1.6, "lost": [], "first_sec": 0.3}
+    h = types.SimpleNamespace(
+        eng=types.SimpleNamespace(a=types.SimpleNamespace(wyoming_sr=22050), say=say),
+        send=lambda typ, data=None, payload=None: ev.append((typ, data, payload)))
+    Wyoming.synthesize(h, {"text": "Раз. Два. Три.", "voice": {"name": "artur"}})
+    # start один, перед первым куском; стоп в конце
+    assert [t for t, _, _ in ev] == ["audio-start", "audio-chunk", "audio-chunk",
+                                     "audio-chunk", "audio-stop"]
+    assert b"".join(p for _, _, p in ev if p is not None) == b"".join(pieces)
+    # метки времени — секунды от начала потока
+    assert [d["timestamp"] for _, d, _ in ev] == [0, 0, 1, 1, 1]
+
+
+def test_wyoming_sends_a_cached_answer_in_one_burst():
+    # из кэша out не зовётся: ответ уже готов и уходит целиком, как раньше
+    from service.tts import Wyoming
+    ev = []
+
+    def say(text, speaker, sr, out):
+        return {"pcm": b"\7" * 88200, "sec": 2.0, "lost": [], "first_sec": None}
+    h = types.SimpleNamespace(
+        eng=types.SimpleNamespace(a=types.SimpleNamespace(wyoming_sr=22050), say=say),
+        send=lambda typ, data=None, payload=None: ev.append((typ, data, payload)))
+    Wyoming.synthesize(h, {"text": "Одна фраза."})
+    assert [t for t, _, _ in ev] == ["audio-start", "audio-chunk", "audio-chunk",
+                                     "audio-stop"]
+    assert b"".join(p for _, _, p in ev if p is not None) == b"\7" * 88200
+    assert ev[-1][1]["timestamp"] == 2                  # 2 с звука
 
 
 def test_model_args_takes_paths_and_labels():

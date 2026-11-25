@@ -6,6 +6,11 @@
 секунде, третий уже 24 мс). Дальше на запрос остаётся разметка (6 мс) и
 синтез (RTF 0.05), то есть фраза на три секунды готова примерно за 0.15 с.
 
+Лишнее из хаб-пакета отдаётся сразу после загрузки голосов — встроенный
+акцентор и базовая модель, если все голоса целые jit (на слабом хосте это
+минус 0.2 ГБ RSS). Серверы поднимаются раньше прогрева: сервис начинает
+отвечать, пока греется джит.
+
 Голосов может быть несколько: `--model` повторяется, и каждая модель получает
 свою подпись (`--model voices/artur/model_voice.pt --model voices/stalker/…`
 или `подпись=путь`). В Home Assistant они приходят одной сущностью TTS, но
@@ -17,8 +22,9 @@
   HTTP      POST /say (тело — текст или JSON) и GET /say?text=… -> WAV;
             GET /health, GET /voices
   wyoming   тот же протокол, что у wyoming-piper: describe -> info,
-            synthesize -> audio-start, audio-chunk…, audio-stop. Прописывается
-            в Home Assistant как ещё один TTS.
+            synthesize -> audio-start, audio-chunk…, audio-stop — по
+            предложениям, как piper: первый кусок уходит, пока считается
+            второй. Прописывается в Home Assistant как ещё один TTS.
 
 Синтез однопоточный (torch.set_num_threads в этом образе не действует), но
 потоки Python работают параллельно: тяжёлые куски внутри torch отпускают GIL.
@@ -32,6 +38,8 @@
     silero_ru python -m service.tts
 """
 import argparse
+import ctypes
+import gc
 import json
 import os
 import re
@@ -51,6 +59,7 @@ from voice.model import (SR, cap_pauses, encode, load, load_state, predict,
 from voice.paths import data
 from voice.text import (accentor, outside, prepare, split_text,
                         utf8_or_cp1251)
+from voice.vocoder_ort import VocoderORT
 
 VERSION = "1.0"
 
@@ -99,6 +108,17 @@ def voice_label(path, speaker):
     return speaker
 
 
+def release_memory():
+    """Отдать ОС пустую память: gc, затем malloc_trim по всем кучам glibc.
+    Освобождённые веса без trim так и висят в куче — на слабом хосте это
+    разница в сотни мегабайт RSS. Не glibc (musl) — просто ничего не делает."""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 class Job:
     """идущий прямо сейчас синтез одной фразы: на нём ждут все, кто попросил
     то же самое, пока он не доложит результат (res) или ошибку (err)"""
@@ -130,6 +150,45 @@ class Engine:
         self.alphabet = set(self.pk.symbols[3:])
         t_model = time.time() - t0
 
+        # Лишнее из хаб-пакета отдаём сразу, до загрузки разметчика: встроенный
+        # акцентор (квантованный BERT, ~86 МБ — сервис размечает внешним
+        # silero-stress) и базовую модель, когда все голоса пришли целыми jit
+        # и сами всё умеют (~120 МБ). Строка-файл [2,128] — не тот случай:
+        # она живёт внутри базовой модели, условие это проверяет. gc здесь, а
+        # malloc_trim один раз в конце прогрева: ступенчатые освобождения с
+        # промежуточными trim отдают вдвое меньше (754 против 663 МБ на замере).
+        if all(m is not hub for m in self.models.values()):
+            self.pk.accentor = None
+            self.pk.models = None
+        del hub
+        gc.collect()
+
+        # Вокодер через ONNX Runtime (int8-спина, динамическое квантование
+        # MatMul — вдвое быстрее джита, CER тот же; см. voice/vocoder_ort.py).
+        # vocoder_dyn.onnx ищется рядом с весами голоса: запечён в образ —
+        # работает, не запечён или нет onnxruntime — голос остаётся на джите.
+        # --vocoder ort требует файл и падает: промах не должен быть тихим.
+        self.voc = {}
+        mode = getattr(a, "vocoder", "auto")
+        if mode != "jit":
+            threads = int(os.environ.get("SILERO_THREADS", "8"))
+            for label, path in a.models:
+                p = os.path.join(os.path.dirname(path), "vocoder_dyn.onnx")
+                if not os.path.exists(p):
+                    if mode == "ort":
+                        raise SystemExit(f"{p}: нет int8-вокодера "
+                                         f"(см. проект silero-int8)")
+                    continue
+                try:
+                    self.voc[label] = VocoderORT(p, self.models[label], threads)
+                    print(f"{label}: вокодер ORT int8", flush=True)
+                except Exception as exc:               # noqa: BLE001
+                    if mode == "ort":
+                        raise
+                    print(f"{label}: int8-вокодер не поднялся "
+                          f"({type(exc).__name__}: {exc}), остаюсь на джите",
+                          flush=True)
+
         self.acc = None
         t_acc = 0.0
         if not a.no_accent:
@@ -145,28 +204,30 @@ class Engine:
         self.inflight = {}
         self.stat = {"requests": 0, "speech_sec": 0.0, "synth_sec": 0.0,
                      "cache_hits": 0, "started": time.time()}
-        t0 = time.time()
-        # прогрев обязательно в отдельном потоке: оптимизация jit срабатывает на
-        # третьем прогоне и не переносится из главного потока — иначе первый
-        # настоящий запрос платит 1.3 с вместо 0.17
-        # разметку греем тем же вызовом: первый вызов разметчика дороже
-        # остальных (модель омографов), и это тоже секунда на первом запросе
-        def warm():
-            # греем каждую модель: оптимизация jit своя у каждой, иначе первый
-            # запрос вторым голосом платит секунду
-            for label in self.models:
-                for k in range(3):
-                    self.say(f"Прогрев голоса {label}, замок и замок, "
-                             f"попытка {k + 1}.", label, sr=self.SR)
-        w = threading.Thread(target=warm)
-        w.start()
-        w.join()
-        self.stat.update(requests=0, speech_sec=0.0, synth_sec=0.0, cache_hits=0)
-        print(f"готов: модели {t_model:.1f} с, {a.accent_engine} {t_acc:.1f} с, "
-              f"прогрев {time.time() - t0:.1f} с; "
+        print(f"готов: модели {t_model:.1f} с, {a.accent_engine} {t_acc:.1f} с; "
               f"голос{'а' if len(self.models) > 1 else ''} "
               f"{', '.join(self.models)} (строка {a.speaker}), "
               f"одновременно {a.workers}", flush=True)
+
+    def warm(self):
+        """Прогрев джита и разметчика. main() зовёт это в фоне уже после
+        старта серверов: сервис отвечает на десятки секунд раньше, а запрос,
+        пришедший до конца прогрева, платит неоптимизированный джит.
+
+        Поток обязателен: оптимизация джита срабатывает на третьем прогоне и
+        не переносится из главного потока — иначе первый настоящий запрос
+        платит 1.3 с вместо 0.17. Разметку греем тем же вызовом: первый вызов
+        разметчика дороже остальных (модель омографов), и это тоже секунда на
+        первом запросе. Греем каждую модель: оптимизация джита своя у каждой,
+        иначе первый запрос вторым голосом платит секунду."""
+        t0 = time.time()
+        for label in self.models:
+            for k in range(3):
+                self.say(f"Прогрев голоса {label}, замок и замок, "
+                         f"попытка {k + 1}.", label, sr=self.SR)
+        self.stat.update(requests=0, speech_sec=0.0, synth_sec=0.0, cache_hits=0)
+        release_memory()
+        print(f"прогрев {time.time() - t0:.1f} с (сервис уже отвечает)", flush=True)
 
     @staticmethod
     def voice_map(models, speakers, own_row):
@@ -204,34 +265,52 @@ class Engine:
             seq, sp = encode(self.pk, text, v.speaker)
             mask, dur, pitch = predict(v.tm, seq, sp)
             dur = cap_pauses(v.tm, seq, dur, pause)
-            _, wav = synth(v.tm, seq, sp, mask, dur, pitch)
+            _, wav = synth(v.tm, seq, sp, mask, dur, pitch,
+                           self.voc.get(v.label))
             return wav.numpy()
 
-    def _render(self, text, v, accent, numbers, sr, gap, pause):
+    def _render(self, text, v, accent, numbers, sr, gap, pause, out=None):
+        """Куски из split_text считаются по очереди, и каждый готовый сразу
+        уходит в out — байты pcm в целевой частоте, с паузой после него.
+        Так wyoming-клиент слышит первое предложение, пока считается второе.
+
+        Громкость поэтому нормируется на кусок, а не на весь ответ: иначе
+        первый ждал бы всю фразу. Эталон — записи диктора — нормирован так
+        же, фраза за фразой (loudness_normalize), и куски одного ответа
+        звучат на одном уровне. Возвращается весь ответ: он идёт в кэш,
+        ждущим ту же фразу и в HTTP."""
         t0 = time.time()
-        parts, marks, lost = [], [], []
-        for i, s in enumerate(split_text(text)):
+        chunks = split_text(text)
+        pcm, marks, lost = [], [], []
+        t_first = None
+        for i, s in enumerate(chunks):
             m, bad = self.mark(s, accent, numbers)
             marks.append(m)
             lost += bad
             with self.sem:
                 w = self._one(m, v, pause)
-            if i:
-                parts.append(np.zeros(int(gap * self.SR), dtype=np.float32))
-            parts.append(w)
-        x = np.concatenate(parts)
-        if self.a.loudness is not None:
-            # до ресемпла: K-взвешивание посчитано под 48 кГц, а ресемпл
-            # после ограничителя уводит пик не дальше его запаса в 0.5 дБ
-            x = loudness_normalize(x, self.SR, self.a.loudness, self.a.peak_dbfs)
-        if sr != self.SR:
-            x = resample(x, self.SR, sr)
-        return {"pcm": pcm_bytes(x), "sr": sr, "sec": len(x) / sr,
+            if self.a.loudness is not None:
+                # до ресемпла: K-взвешивание посчитано под 48 кГц, а ресемпл
+                # после ограничителя уводит пик не дальше его запаса в 0.5 дБ
+                w = loudness_normalize(w, self.SR, self.a.loudness, self.a.peak_dbfs)
+            if i + 1 < len(chunks):
+                w = np.concatenate([w, np.zeros(int(gap * self.SR), dtype=np.float32)])
+            if sr != self.SR:
+                w = resample(w, self.SR, sr)
+            b = pcm_bytes(w)
+            pcm.append(b)
+            if t_first is None:
+                t_first = time.time() - t0
+            if out is not None:
+                out(b)
+        x = b"".join(pcm)
+        return {"pcm": x, "sr": sr, "sec": len(x) / 2 / sr,
                 "text": " ".join(marks), "lost": sorted(set(lost)),
-                "synth_sec": time.time() - t0}
+                "synth_sec": time.time() - t0,
+                "first_sec": t_first if len(chunks) > 1 else None}
 
     def say(self, text, speaker=None, accent=True, numbers=True, sr=None, gap=0.25,
-            pause=None):
+            pause=None, out=None):
         """Готовый ответ из кэша, ожидание чужого синтеза той же фразы — или
         свой синтез.
 
@@ -242,6 +321,9 @@ class Engine:
         72 ядрах: из 200 одинаковых запросов кэшем отвечали 158 (HTTP) и 165
         (wyoming), остальные синтезировали заново. Теперь первый считает,
         прочие ждут его на Job и забирают тот же самый ответ.
+
+        out — куски своего синтеза уходят в него по мере готовности (см.
+        _render); из кэша и с чужого Job ответ приходит целиком — он уже есть.
         """
         v = self.pick(speaker)
         sr = sr or self.a.sr
@@ -269,7 +351,7 @@ class Engine:
                 self.stat["requests"] += 1
             return job.res
         try:
-            res = self._render(text, v, accent, numbers, sr, gap, pause)
+            res = self._render(text, v, accent, numbers, sr, gap, pause, out)
         except BaseException as exc:                   # noqa: BLE001
             job.err = exc
             with self.lock:
@@ -465,19 +547,39 @@ class Wyoming(socketserver.StreamRequestHandler):
                 self.synthesize(data)
 
     def synthesize(self, data):
+        """Звук уходит по предложениям, как у wyoming-piper: audio-start —
+        с первым готовым куском, дальше каждый, как посчитался, audio-stop в
+        конце. Home Assistant начинает играть первое предложение, не дожидаясь
+        остальных. Из кэша фраза уже есть и уходит одним залпом."""
         text = (data.get("text") or "").strip()
         voice = (data.get("voice") or {}).get("name")
         sr = self.eng.a.wyoming_sr
         t0 = time.time()
-        r = self.eng.say(text, speaker=voice, sr=sr)
-        self.send("audio-start", {"rate": sr, "width": 2, "channels": 1, "timestamp": 0})
         step = sr * 2                                   # по секунде звука на событие
+        fmt = {"rate": sr, "width": 2, "channels": 1}
+        pos, started = 0, False                         # ушло звука, байт
+
+        def out(b):
+            nonlocal pos, started
+            if not started:                             # до этого клиент ничего не ждёт
+                self.send("audio-start", dict(fmt, timestamp=0))
+                started = True
+            for k in range(0, len(b), step):
+                self.send("audio-chunk", dict(fmt, timestamp=(pos + k) // step),
+                          b[k:k + step])
+            pos += len(b)
+
+        r = self.eng.say(text, speaker=voice, sr=sr, out=out)
         pcm = r["pcm"]
-        for k in range(0, len(pcm), step):
-            self.send("audio-chunk", {"rate": sr, "width": 2, "channels": 1,
-                                      "timestamp": k // (sr * 2)}, pcm[k:k + step])
-        self.send("audio-stop", {"timestamp": len(pcm) // (sr * 2)})
-        print(f"wyoming {r['sec']:.2f} с речи за {time.time() - t0:.2f} с"
+        if not started:                                 # из кэша или с чужого Job — целиком
+            self.send("audio-start", dict(fmt, timestamp=0))
+            for k in range(0, len(pcm), step):
+                self.send("audio-chunk", dict(fmt, timestamp=k // step), pcm[k:k + step])
+        self.send("audio-stop", {"timestamp": len(pcm) // step})
+        # «первый кусок» имеет смысл только у стриминга: из кэша ответ цельный
+        first = f", первый кусок через {r['first_sec']:.2f} с" \
+            if started and r["first_sec"] else ""
+        print(f"wyoming {r['sec']:.2f} с речи за {time.time() - t0:.2f} с" + first
               + (f", ВНЕ АЛФАВИТА {r['lost']}" if r["lost"] else ""), flush=True)
 
 
@@ -506,7 +608,8 @@ def main():
     ap.add_argument("--pause-max", type=float, default=0.5,
                     help="потолок паузы на точке внутри фразы, с (0 — как у модели)")
     ap.add_argument("--loudness", type=float, default=None, metavar="LUFS",
-                    help="нормировать каждый ответ до этой громкости "
+                    help="нормировать каждое предложение ответа до этой "
+                         "громкости "
                     "(BS.1770, моно; у живых записей диктора −15.7…−16.0 на "
                     "канал — берите -15.8); без ключа звук уходит как "
                     "синтезировался")
@@ -517,6 +620,11 @@ def main():
                     help="разметчик ударений: silero-stress или RUAccent")
     ap.add_argument("--accent-model", default="turbo3.1", help="модель омографов RUAccent")
     ap.add_argument("--no-accent", action="store_true", help="без RUAccent (старт за 2 с)")
+    ap.add_argument("--vocoder", default="auto", choices=["auto", "ort", "jit"],
+                    help="вокодер: auto — ONNX Runtime int8, если рядом с весами "
+                         "голоса лежит vocoder_dyn.onnx, иначе джит; ort — "
+                         "требовать int8 (нет файла — стартовать откажусь); "
+                         "jit — всегда родной")
     a = ap.parse_args()
     a.model = a.model or [data("train/model_voice.pt")]
     a.models = model_args(a.model, speaker=a.speaker)
@@ -531,6 +639,9 @@ def main():
     threading.Thread(target=tcp.serve_forever, daemon=True).start()
     http = ThreadingHTTPServer((a.host, a.http_port), Handler)
     print(f"http://{a.host}:{a.http_port}/say  wyoming {a.host}:{a.wyoming_port}", flush=True)
+    # прогрев в фоне: серверы уже отвечают, запрос до конца прогрева платит
+    # неоптимизированный джит (~1.3 с вместо 0.17 на длинной фразе)
+    threading.Thread(target=eng.warm, daemon=True).start()
     try:
         http.serve_forever()
     except KeyboardInterrupt:

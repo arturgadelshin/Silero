@@ -27,6 +27,21 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu \
       torch==2.5.1 torchaudio==2.5.1 \
  && pip install numpy omegaconf "silero-stress"
 
+# libgomp1 — только ради aarch64: там libtorchaudio.so слинкован с системным
+# libgomp.so.1, а в slim его нет (у torch свой, но переименованный в
+# torch.libs/libgomp-*.so, и его видит только torch). На x86_64 зависимости
+# нет, там всё работало без пакета. На aarch64 падает первый же import
+# torchaudio — то есть lufs() при --loudness и ресемпл под wyoming, а
+# «curl /say» на 48 кГц — нет: проверка HTTP такую сборку пропускает.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+# onnxruntime — для int8-вокодера (voice/vocoder_ort.py + vocoder_dyn.onnx):
+# колесо 6 МБ, сессия в живом процессе +10 МБ RSS, синтез ~1.7x быстрее джита
+# при CER 0.000. Отдельным слоем после apt — чтобы правки кода не перекачивали
+# torch: кэш слоёв идёт сверху вниз, а этот RUN дешевле того, что выше.
+RUN pip install onnxruntime
+
 WORKDIR /app
 COPY voice/ /app/voice/
 COPY service/ /app/service/
@@ -37,6 +52,12 @@ COPY service/ /app/service/
 # Каждый файл это 92 МБ образа и +0.2 ГБ RAM у процесса.
 COPY voices/artur/model_voice.pt /opt/voices/artur/model_voice.pt
 COPY voices/stalker/model_voice.pt /opt/voices/stalker/model_voice.pt
+# int8-спины вокодеров (динамическое квантование MatMul, проект silero-int8:
+# probe-скрипты и подбор конфигурации — в tvbox-репозитории операций).
+# У stalker первый MatMul остаётся fp32: он один видит сырой мел, и его
+# u8-квантование съедает разборчивость коротких фраз (детали — README проекта).
+COPY voices/artur/vocoder_dyn.onnx /opt/voices/artur/vocoder_dyn.onnx
+COPY voices/stalker/vocoder_dyn.onnx /opt/voices/stalker/vocoder_dyn.onnx
 
 # хаб-кэш Silero нужен даже с готовыми весами: load() всегда идёт в
 # torch.hub за пакетом v5_5_ru (символы алфавита, список голосов, сам jit).

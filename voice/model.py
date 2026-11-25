@@ -75,9 +75,12 @@ def cap_pauses(tm, seq, dur, max_sec):
     return dur
 
 
-def synth(tm, seq, sp, mask, dur, pitch):
+def synth(tm, seq, sp, mask, dur, pitch, voc=None):
+    """tacotron как был; вокодер — родной джит или подмена voc (VocoderORT:
+    int8-спина в ONNX Runtime + джит-голова, см. voice/vocoder_ort.py)."""
     mel = tm.tacotron(seq, sp, mask, dur, pitch, None)
-    wav = tm.vocoder(mel, SR, 0.0, True)
+    wav = voc(mel, SR, 0.0, True) if voc is not None \
+        else tm.vocoder(mel, SR, 0.0, True)
     return mel, wav.reshape(-1)
 
 
